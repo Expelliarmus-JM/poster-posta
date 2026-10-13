@@ -1,0 +1,4 @@
+# 部署到静态托管时不必上传的开发文件：站点运行不依赖它们。
+build.py
+engine.test.cjs
+verification.json
