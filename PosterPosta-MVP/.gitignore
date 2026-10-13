@@ -1,0 +1,10 @@
+.env
+.env.local
+.env.production
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+node_modules/
+.DS_Store
+coverage/

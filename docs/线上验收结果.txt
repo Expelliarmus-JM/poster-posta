@@ -1,0 +1,49 @@
+# PosterPosta 线上验收记录（开发沙盒，未发送任何真实邮件）
+# 目标：https://0978b3f98c95477f965d8169479227c9.app-tencent.workbuddy.host
+#
+# 验收时间线：
+#   2026-09-14 14:48 CST  首次验收（后端发布后）
+#   2026-09-14 15:05 CST  验证码限流修复重新发布后复验
+#
+# 本次复验重点：修复「沙箱所有访客共用同一出口 IP，按 IP 限流导致
+# 60 秒内只能有一个人注册」的问题（开发环境改为只按邮箱限流）。
+
+== 复验 A：限流修复本身（curl 直连）==
+• 页面加载: HTTP 200 / 5158 bytes
+• 邮箱 A 首次请求验证码: 200（返回 devCode）
+• 同一出口 IP、邮箱 B 请求验证码: 200  <-- 修复前此处为 429
+• 邮箱 A 立刻重复请求: 429 RATE_LIMITED（同一邮箱仍受保护）
+• 服务端 config: bindHost=0.0.0.0, appEnv=development, persistence=sqlite
+
+== 复验 B：双向寄送全流程（verify-live.mjs）==
+== 1. 发件人登录并存一封新信 ==
+== 2. 未投递前不能签收 ==
+== 3. 匿名预览必须脱敏 ==
+== 4. 发件人模拟投递（开发沙盒，不发邮件）==
+== 5. 收件人登录后签收 ==
+== 6. 双方共享同一段对话 ==
+
+---- 验收结果 ----
+• 发件人资产: ["tokyo-free/sent","tokyo-stamp/used","tokyo-tower/sent","tokyo-stamp-sakura/used","tokyo-night/sent","tokyo-stamp-tower/used","tokyo-stamp-tower/used","tokyo-stamp/used"]
+  （同一测试账号多次验收累积，符合预期）
+• 沙盒购买: tokyo-night/unused + tokyo-stamp-tower/unused
+• 寄出: transit / 10个工作日 / eta 2026-09-28T07:05:05.373Z
+• 领取凭据已发放: true
+• 发件人读取（邮箱不匹配）: 403 CLAIM_EMAIL_MISMATCH
+• 匿名可见字段: ["fromName","maskedEmail"]
+• 匿名预览内容: {"fromName":"手机体验","maskedEmail":"r***@e***.test"}
+• 匿名是否泄露全文: false
+• 模拟投递后状态: delivered
+• 收件人签收前资产数: 1
+• 收件人可见全文: "这段话应该只对验证了收件邮箱的人可见。"
+• 签收后信件状态: received
+• 收件人资产: ["tokyo-night/received","tokyo-night/received"]
+• 重复签收: 409 ALREADY_CLAIMED
+• 发件人看到的信件状态: received
+• 发件人看到的消息: ["收件人: 收到了，这张明信片比想象中好看。"]
+• 签收后的卡片能否再次转售: listAsset -> 409 {"ok":false,"error":"资产已使用或已锁定。","code":"ASSET_NOT_UNUSED"}
+
+---- 结论 ----
+限流修复后全流程无回归：权限隔离（邮箱不匹配读取被拒）、匿名脱敏（不泄露全文）、
+资产原子转移、重复签收防重、双向对话共享、已用资产禁转售，六项全部符合预期。
+本地测试套件 44 项全部通过，且从交付 zip 解压后的副本运行同样 44 项通过。

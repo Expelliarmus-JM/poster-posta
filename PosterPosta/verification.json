@@ -1,0 +1,35 @@
+{
+  "checked_at": "2026-09-11T18:03:40.947822+08:00",
+  "engine": {
+    "tests": 53,
+    "pass": 53,
+    "fail": 0
+  },
+  "browser": {
+    "desktop_width": 1440,
+    "mobile_widths": [
+      390,
+      375
+    ],
+    "route_overflow": false,
+    "compose_overflow_fixed": true,
+    "offline_css_rules": 423,
+    "offline_network_requests": 0,
+    "broken_images": 0,
+    "flows_passed": [
+      "邮箱演示注册续接免费领取",
+      "免费卡附赠当地邮票",
+      "寄语预览与距离分档",
+      "明信片邮票原子消耗",
+      "寄送中禁聊与送达后解锁",
+      "全球市集跨城市购买与成交价记账",
+      "交易咨询归档社区",
+      "原创上传版权确认与待审核",
+      "演示审核上架锁定与下架恢复",
+      "刷新恢复原创图片和资产",
+      "3款当地邮票补购并返回写信",
+      "草稿自动保存与恢复"
+    ]
+  },
+  "production_connected": false
+}

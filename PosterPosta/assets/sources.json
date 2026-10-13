@@ -1,0 +1,24 @@
+{
+  "purpose": "旅行摄影仅用于本地交互原型示意，不是可直接销售的授权素材库。商业上线须逐张复核作者、许可、人物和建筑物相关权利，并替换为自有或明确授权作品。",
+  "source": "Unsplash public image CDN",
+  "images": {
+    "tokyo-street.jpg": "https://images.unsplash.com/photo-1513407030348-c983a97b98d8",
+    "tokyo-tower.jpg": "https://images.unsplash.com/photo-1540959733332-eab4deabeeaf",
+    "tokyo-sakura.jpg": "https://images.unsplash.com/photo-1522383225653-ed111181a951",
+    "tokyo-night.jpg": "https://images.unsplash.com/photo-1503899036084-c55cdd92da26",
+    "tokyo-temple.jpg": "https://images.unsplash.com/photo-1521734952068-852cfb00d46f",
+    "tokyo-rain.jpg": "https://images.unsplash.com/photo-1536098561742-ca998e48cbcc",
+    "tokyo-cafe.jpg": "https://images.unsplash.com/photo-1519056894482-50b7093ce330",
+    "paris.jpg": "https://images.unsplash.com/photo-1502602898657-3e91760cbb34",
+    "kyoto.jpg": "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e",
+    "london.jpg": "https://images.unsplash.com/photo-1513635269975-59663e0ac1ad",
+    "shenzhen.jpg": "https://images.unsplash.com/photo-1523540451401-62a9b7d94b02",
+    "shanghai.jpg": "https://images.unsplash.com/photo-1505192072862-0baa69c7f28b"
+  },
+  "location_notes": {
+    "tokyo-cafe.jpg": "东京秋叶原街景，非咖啡馆。文件名为开发素材标识。",
+    "tokyo-temple.jpg": "东京浅草寺宝藏门",
+    "shenzhen.jpg": "深圳福田市民中心及天际线",
+    "shanghai.jpg": "上海陆家嘴天际线"
+  }
+}

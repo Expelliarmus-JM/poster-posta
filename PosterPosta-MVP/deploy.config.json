@@ -1,0 +1,8 @@
+{
+  "note": "云端演示部署参数：托管环境不会把启动命令里的环境变量传进来，也不会保留 .env 之类的文件，所以随源码一起走。HOST 必须是 0.0.0.0 才能让反向代理转发；PUBLIC_ORIGIN 必须与访问域名一致。本机开发用 npm run dev 即可，会自动忽略此文件（只绑回环）。",
+  "env": {
+    "APP_ENV": "development",
+    "HOST": "0.0.0.0",
+    "PUBLIC_ORIGIN": "https://0978b3f98c95477f965d8169479227c9.app-tencent.workbuddy.host"
+  }
+}

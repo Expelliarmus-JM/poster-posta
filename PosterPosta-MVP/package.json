@@ -1,0 +1,15 @@
+{
+  "name": "posterposta-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PosterPosta SQLite 持久化后端与无外部依赖测试",
+  "main": "server.cjs",
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.cjs",
+    "dev": "node --env-file-if-exists=.env --watch server.cjs",
+    "test": "node --test server.test.cjs"
+  }
+}

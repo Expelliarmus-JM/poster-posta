@@ -1,0 +1,52 @@
+{
+  "product": "PosterPosta",
+  "version": "0.1.0",
+  "stage": "已发布到演示沙箱的可运行后端MVP，不是已上线商业产品",
+  "runtime": "Node.js >=22.22.2，零外部运行依赖；node:sqlite 在当前运行时仍有实验性警告",
+  "start": "本地：在项目目录执行 npm start，默认只监听 http://127.0.0.1:4180，仅本机可访问",
+  "deployment": {
+    "published_demo": "https://0978b3f98c95477f965d8169479227c9.app-tencent.workbuddy.host",
+    "mode": "APP_ENV=development 的公开演示沙箱：注册可自助完成，付费购买与审核按钮为演示开关，不涉及真实扣款",
+    "params": "托管环境不会把启动命令里的环境变量传给进程，因此部署参数写在 deploy.config.json（根目录与 public/ 各一份）。HOST=0.0.0.0 让反向代理可转发，PUBLIC_ORIGIN 必须与访问域名一致",
+    "host_admission": "绑回环时 Host 是唯一准入屏障，必须严格匹配；开发环境显式对外监听且未配置对外域名时不再用 Host 卡自己，跨站请求仍由 Origin 与 Fetch Metadata 拒绝；生产始终只认 PUBLIC_ORIGIN"
+  },
+  "test": "npm test",
+  "configuration": ".env.example 是配置模板，实际凭据只能放未入库的 .env 或服务器环境变量；deploy.config.json 只放非敏感部署参数",
+  "database": "开发 data/development.sqlite 与生产 data/production.sqlite 默认隔离，可用 DB_PATH 指定绝对路径；ZIP不包含数据库和测试账户",
+  "implemented": [
+    "邮箱随机OTP、有效期、尝试上限、按邮箱限流（生产再加出口IP维度）、会话哈希与HttpOnly Cookie",
+    "SQLite真实持久化、多账户隔离、服务端城市资格与资产所有权验证",
+    "免费名额跨城市唯一、附赠邮票、原子消耗、市场并发交易单胜者",
+    "开发显式沙盒购买；生产支付未接入时禁止付费发货",
+    "固定工作日ETA、持久投递队列、邮件不确定状态保留，不伪造送达",
+    "收件链接绑定邮箱、一次性签收及资产转移、双向共享聊天与市集咨询",
+    "图片格式和魔数校验、版权声明、原创待审核与开发审核上架",
+    "前端账号隔离草稿、真实API刷新、移动端适配、请求防重复",
+    "监听地址与 Host 准入可配置：本机开发严格，反向代理部署可放行指定域名"
+  ],
+  "external_adapters": {
+    "email": "Resend HTTPS API已实现，未配置也未实际发送；开发永不发送",
+    "ip_location": "腾讯位置服务IP接口已实现，未配置也未实网验证；不识别城市暂停当地获取",
+    "payment": "未实现真实商户支付、退款、提现，生产强制关闭",
+    "hosting": "已发布到托管沙箱做演示，但未做生产部署：仍缺HTTPS自有域名、持久化磁盘、备份和监控"
+  },
+  "before_public_launch": [
+    "配置并验证邮箱域名、发信密钥、腾讯定位Key、HTTPS公开域名",
+    "接入支付商户、服务端支付回调、退款争议与结算体系",
+    "邮件送达/退信webhook、拒收和屏蔽、发送频率与滥用防护",
+    "管理员审核和举报工单、隐私政策、数据删除、素材商业授权",
+    "上传对象存储、分页/配额、监控报警、备份恢复、负载与安全评审"
+  ],
+  "verification": {
+    "backend_tests_passed": 43,
+    "backend_tests_failed": 0,
+    "frontend_browser": "双账户寄送签收聊天、市集购买、上传审核和草稿隔离已验收；演示沙箱上复核了注册、免费领取、距离估算、寄信原子消耗与刷新后数据库恢复",
+    "live_two_party_flow": "verify-live.mjs 在演示沙箱跑通：沙盒购买→寄信 transit(8个工作日)→发件人持链接读取被拒(CLAIM_EMAIL_MISMATCH)→匿名预览仅返回 fromName 与脱敏邮箱→模拟投递 delivered→收件人邮箱验证后签收 received 且资产转移→重复签收 409→双方看到同一段对话→已签收卡片转售被拒(ASSET_NOT_UNUSED)。全程未发送真实邮件",
+    "sandbox_rate_limit": "演示沙箱所有访客共用同一出口IP，原先按IP限流会让同时体验的人互相卡住；已改为开发环境只按邮箱限流（生产仍保留IP维度），本机验证同一IP下不同邮箱可连续注册、同一邮箱重复仍 429",
+    "production_services": "未配置，未实网验收"
+  },
+  "official_references": [
+    "https://resend.com/docs/api-reference/emails/send-email",
+    "https://lbs.qq.com/service/webService/webServiceGuide/webServiceIp"
+  ]
+}

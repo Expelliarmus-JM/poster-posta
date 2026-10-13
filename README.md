@@ -1,0 +1,60 @@
+# PosterPosta
+
+「把旅行明信片寄给未来」的交互原型 + 可运行的 SQLite 后端 MVP。
+
+仓库里是两条演进线：
+
+| 目录 | 内容 | 形态 |
+| --- | --- | --- |
+| `PosterPosta/` | 前端原型：写信、贴邮票、市集、寄送与签收全流程 | 纯静态，浏览器直接打开 |
+| `PosterPosta-MVP/` | 在其之上加真实后端：邮箱 OTP 登录、SQLite 持久化、资产归属与投递队列 | Node.js，零外部依赖 |
+| `docs/` | 线上验收记录 | 文本 |
+
+## 快速开始
+
+### 前端原型
+
+```bash
+open PosterPosta/index.html        # 或任意静态服务器指向该目录
+```
+
+数据全部走内存，不落盘，适合看交互和视觉。
+
+### 后端 MVP
+
+要求 Node.js >= 22.22.2（用到内置 `node:sqlite`）。
+
+```bash
+cd PosterPosta-MVP
+cp .env.example .env               # 按需填写；不填也能以开发模式跑起来
+npm start                          # 默认 http://127.0.0.1:4180，仅本机可访问
+npm test                           # node --test，硬性零外部依赖
+```
+
+`npm run dev` 是带 `--watch` 的开发模式。数据库按环境隔离在 `data/development.sqlite` 或 `data/production.sqlite`，可用 `DB_PATH` 指到绝对路径。
+
+## 当前边界
+
+- **已实现**：邮箱随机 OTP（有效期 / 尝试上限 / 按邮箱限流）、会话哈希与 HttpOnly Cookie、SQLite 多账户隔离、服务端城市资格与资产所有权校验、免费名额跨城市唯一与原子消耗、市集并发交易单胜者、固定工作日 ETA 与持久投递队列、收件链接绑定邮箱与一次性签收、双向共享聊天、图片格式与魔数校验、原创待审核。
+- **未实现**：真实商户支付与退款、生产级 HTTPS 域名、持久化磁盘与备份监控。
+
+`.env.example` 里的 `RESEND_API_KEY`、`TENCENT_LOCATION_KEY` 均为空模板：邮件与 IP 定位适配器已按官方接口写好，但**未配置、未实网验证**；开发模式永不发送真实邮件。支付未接入时，生产环境会强制拒绝付费发货。
+
+## 测试与验收
+
+- `PosterPosta/engine.test.cjs` — 前端状态机与业务规则，53 项全通过，结果见 `verification.json`
+- `PosterPosta-MVP/server.test.cjs` — 后端接口与权限隔离，44 项全通过
+- `PosterPosta-MVP/verify-live.mjs` — 对已部署沙箱跑双人全流程（寄送 → 拒绝越权读取 → 匿名脱敏 → 投递 → 签收转移 → 重复签收 409 → 共享对话），记录见 `docs/线上验收结果.txt`
+
+## 素材与许可
+
+- 字体：DM Sans、Libre Caslon Display，均为 SIL Open Font License，许可全文随 `assets/` 一起入库。
+- 摄影图片：来自 Unsplash，**仅用于原型示意**，不是可直接商用的授权素材库。逐张来源见 `assets/sources.json`。商业上线前必须复核作者、许可、人物与建筑物相关权利，或替换为自有素材。
+
+## 注意
+
+`PosterPosta/build.py` 会把前端打成一个自包含的离线 HTML（`PosterPosta.html`）和源码 zip。这两个产物属于本机构建输出，已在 `.gitignore` 中排除：
+
+```bash
+cd PosterPosta && python3 build.py
+```
