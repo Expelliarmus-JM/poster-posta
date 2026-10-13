@@ -5,9 +5,9 @@
   "runtime": "Node.js >=22.22.2，零外部运行依赖；node:sqlite 在当前运行时仍有实验性警告",
   "start": "本地：在项目目录执行 npm start，默认只监听 http://127.0.0.1:4180，仅本机可访问",
   "deployment": {
-    "published_demo": "https://0978b3f98c95477f965d8169479227c9.app-tencent.workbuddy.host",
-    "mode": "APP_ENV=development 的公开演示沙箱：注册可自助完成，付费购买与审核按钮为演示开关，不涉及真实扣款",
-    "params": "托管环境不会把启动命令里的环境变量传给进程，因此部署参数写在 deploy.config.json（根目录与 public/ 各一份）。HOST=0.0.0.0 让反向代理可转发，PUBLIC_ORIGIN 必须与访问域名一致",
+    "published_demo": "https://poster-posta.app-tencent.workbuddy.host",
+    "mode": "APP_ENV=development 的公开演示沙箱：邮箱验证码登录可自助完成（开发模式不发送邮件、验证码由服务端直接返回），付费购买与审核按钮为演示开关，不涉及真实扣款",
+    "params": "托管环境的反向代理不转发公开域名，而是把内部主机名当 Host 转发（实测形如 <端口>-<sandboxId>.e2b.<地域>.internal.invalid），两个参数必须同时配：ALLOWED_HOSTS 覆盖内部域名（过 Host 校验），PUBLIC_ORIGIN 写公开访问域名（过浏览器 Origin 校验）。只配 PUBLIC_ORIGIN 会 HOST_FORBIDDEN，只配 ALLOWED_HOSTS 会 CSRF_ORIGIN。参数写在 deploy.config.json（根目录与 public/ 各一份，经实测会被读取）；HOST=0.0.0.0 让反向代理可转发。startCmd 里内联环境变量不可靠（实测不生效），不要走那条路。",
     "host_admission": "绑回环时 Host 是唯一准入屏障，必须严格匹配；开发环境显式对外监听且未配置对外域名时不再用 Host 卡自己，跨站请求仍由 Origin 与 Fetch Metadata 拒绝；生产始终只认 PUBLIC_ORIGIN"
   },
   "test": "npm test",
@@ -48,7 +48,8 @@
     "live_two_party_flow": "verify-live.mjs 在演示沙箱跑通：沙盒购买→寄信 transit(8个工作日)→发件人持链接读取被拒(CLAIM_EMAIL_MISMATCH)→匿名预览仅返回 fromName 与脱敏邮箱→模拟投递 delivered→收件人邮箱验证后签收 received 且资产转移→重复签收 409→双方看到同一段对话→已签收卡片转售被拒(ASSET_NOT_UNUSED)。全程未发送真实邮件",
     "sandbox_rate_limit": "演示沙箱所有访客共用同一出口IP，原先按IP限流会让同时体验的人互相卡住；已改为开发环境只按邮箱限流（生产仍保留IP维度），本机验证同一IP下不同邮箱可连续注册、同一邮箱重复仍 429",
     "production_services": "未配置，未实网验收",
-    "account_browser": "本机开发模式验收：新邮箱验证码注册并补昵称、发送验证码60秒倒计时、绑定第二邮箱、设置密码与弱密码拦截、会话过期后解绑触发二次验证（错密码提示、正确密码后自动继续）、命令行密码登录出现第二台设备并在浏览器下线、退出后密码登录、390px 宽度无横向溢出"
+    "account_browser": "本机开发模式验收：新邮箱验证码注册并补昵称、发送验证码60秒倒计时、绑定第二邮箱、设置密码与弱密码拦截、会话过期后解绑触发二次验证（错密码提示、正确密码后自动继续）、命令行密码登录出现第二台设备并在浏览器下线、退出后密码登录、390px 宽度无横向溢出",
+    "hosted_consistency": "公开沙箱为常驻进程 + 单个 SQLite 文件（data/），所有访客共享同一份数据：浏览器内注册并设置密码后，命令行独立客户端可用同一密码登录并读到同一账号状态；错误密码被拒；完整重新部署后账号仍在，data/ 目录跨部署持久。"
   },
   "official_references": [
     "https://resend.com/docs/api-reference/emails/send-email",

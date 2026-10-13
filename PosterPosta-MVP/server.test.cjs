@@ -354,13 +354,18 @@ test('deploy.env.json 只作为默认值，不覆盖显式传入或真实环境�
   const defaults = deployEnvDefaults();
   assert.equal(defaults.APP_ENV, 'development');
   assert.equal(defaults.HOST, '0.0.0.0');
-  assert.match(defaults.PUBLIC_ORIGIN, /^https:\/\/[a-z0-9]+\.app-tencent\.workbuddy\.host$/);
+  // 托管环境的反向代理转发的是内部主机名、而不是公开域名，所以两个都要配：
+  // ALLOWED_HOSTS 覆盖内部域名（过 Host 校验），PUBLIC_ORIGIN 是公开访问域名（过浏览器 Origin 校验）。
+  // 只配 PUBLIC_ORIGIN 会被 HOST_FORBIDDEN 拒绝，只配 ALLOWED_HOSTS 会被 CSRF_ORIGIN 拒绝。
+  assert.match(defaults.PUBLIC_ORIGIN, /^https:\/\/[a-z0-9-]+\.app-tencent\.workbuddy\.host$/);
+  assert.equal(defaults.ALLOWED_HOSTS, '*.internal.invalid');
 
   // 显式传入 env 时完全忽略该文件，测试与本地默认行为不被部署参数污染。
   const explicit = createApp({ dbPath: ':memory:', env: { APP_ENV: 'development' } });
   t.after(() => explicit.close());
   assert.equal(explicit.config.bindHost, '127.0.0.1');
   assert.equal(explicit.config.publicOrigin, null);
+  assert.deepEqual(explicit.config.allowedHosts, []);
   // 真实环境变量优先于文件里的同名项。
   const overridden = createApp({ dbPath: ':memory:', env: { APP_ENV: 'development', ...defaults, HOST: '127.0.0.1' } });
   t.after(() => overridden.close());
