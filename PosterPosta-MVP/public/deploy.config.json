@@ -1,9 +1,0 @@
-{
-  "note": "云端常驻部署参数（与项目根目录一份保持一致）：托管环境的反向代理不把公开域名当 Host 转发，而是转发内部主机名（实测形如 <端口>-<sandboxId>.e2b.<地域>.internal.invalid）。因此两者必须分开写：ALLOWED_HOSTS 放内部域名通配，用于通过 Host 校验；PUBLIC_ORIGIN 放公开访问域名，用于通过浏览器 Origin 校验（页面 JS 发请求时带的是公开域名）。只写 PUBLIC_ORIGIN 会被 HOST_FORBIDDEN 拒绝——因为 Host 与它不匹配；只写 ALLOWED_HOSTS 会被 CSRF_ORIGIN 拒绝。更换公开域名时只改 PUBLIC_ORIGIN。",
-  "env": {
-    "APP_ENV": "development",
-    "HOST": "0.0.0.0",
-    "PUBLIC_ORIGIN": "https://poster-posta.app-tencent.workbuddy.host",
-    "ALLOWED_HOSTS": "*.internal.invalid"
-  }
-}

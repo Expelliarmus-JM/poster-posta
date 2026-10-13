@@ -60,11 +60,26 @@ npm test                           # node --test，硬性零外部依赖
 
 **排查用**：忘了配 `PUBLIC_ORIGIN` 会被 `CSRF_ORIGIN` 拒绝；`ALLOWED_HOSTS` 没覆盖实际 Host 会被 `HOST_FORBIDDEN` 拒绝。两者都是 403，看 `code` 字段即可区分。`/healthz` 刻意放在这两道校验之前（托管平台探针常带内部主机名），只返回 `{"ok":true}`，不泄露配置。
 
-### 云端沙箱（当前线上演示）
+### 云端沙箱（需要「参数随源码走」的环境）
 
-托管环境的反向代理不转发公开域名，而是把内部主机名当 Host 转发，因此两个白名单必须分开写：`ALLOWED_HOSTS` 放内部域名，`PUBLIC_ORIGIN` 放公开域名。这类环境拿不到启动命令里的环境变量，参数写在仓库内的 `PosterPosta-MVP/deploy.config.json`（以及 `public/` 下一份副本）。
+有些托管环境的反向代理不转发公开域名，而是把内部主机名当 Host 转发，并且拿不到启动命令里的环境变量。这类环境可以把参数写进 `deploy.env.json`（或 `deploy.config.json`、`public/deploy.config.json`，三者等价）：**这些文件名一律不入库**，模板在 `PosterPosta-MVP/deploy.env.example.json`。原因是里面写的是具体主机名——换部署目标就失效，提交到公开仓库还会泄露内网域名。
 
-读取优先级是 **真实环境变量 > `deploy.config.json`**，所以同一份代码可以同时服务两类平台：文件留给不支持环境变量的沙箱，Railway 等平台在控制台设置即可覆盖。注意沙箱那份文件里写的是沙箱自己的域名——换平台后如果发现有变量漏配，会回落到这些值上，表现为 403。
+```
+读参数优先级：真实环境变量  >  deploy.env.json
+按 deploy.config.json → public/deploy.config.json → deploy.env.json 顺序查找，命中一个就不再往后看
+```
+
+因此同一份代码可以同时服务两类平台：不支持环境变量的沙箱走文件，Railway 等平台在控制台设置。这类环境通常要分开配两条：`ALLOWED_HOSTS` 放反向代理实际转发的主机名（过 Host 校验），`PUBLIC_ORIGIN` 放公开访问域名（过浏览器 Origin 校验）——只配一个会分别收到 `HOST_FORBIDDEN` 和 `CSRF_ORIGIN`。
+
+### GitHub Pages（纯静态前端）
+
+`PosterPosta/` 是自包含的静态站，可以直接用 Pages 托管，`push` 即更新，不需要任何构建或工作流：
+
+1. 仓库需为 **公开**（GitHub Free 账号的 Pages 只支持公开仓库；私有仓库要 Pro 及以上）
+2. Settings → Pages → Source 选 **Deploy from a branch**，Branch 选 `main`、目录选 `/PosterPosta`，保存
+3. 一两分钟后访问 `https://<用户名>.github.io/<仓库名>/`
+
+目录里的 `.nojekyll` 用来跳过 Jekyll 处理。注意 Pages 只托管文件、没有服务端，所以这一版没有真实账号体系：登录是本地模拟，数据存在各人浏览器里，换设备就没了。要共享的账号与信件状态，必须部署 `PosterPosta-MVP/`。
 
 ## 账号体系
 

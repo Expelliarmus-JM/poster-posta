@@ -16,6 +16,12 @@ data/
 *.sqlite-wal
 *.sqlite-shm
 
+# 环境相关的部署参数：写的是具体主机名，换部署目标就失效；
+# 提交到公开仓库还会泄露内网域名。模板见 PosterPosta-MVP/deploy.env.example.json
+PosterPosta-MVP/deploy.config.json
+PosterPosta-MVP/public/deploy.config.json
+PosterPosta-MVP/deploy.env.json
+
 # 编辑器 / 系统
 .DS_Store
 .idea/

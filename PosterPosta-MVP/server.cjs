@@ -202,10 +202,15 @@ function maskEmail(email) {
 // 部署参数可以随源码放进 deploy.config.json：有些托管环境不会把启动命令里的
 // 环境变量传给进程，也会在打包时跳过 .env 之类的文件，所以两个位置都找一遍。
 // 只在调用方没有显式传入 env 时读取，且真实环境变量优先。
-function deployEnvDefaults() {
-  for (const relative of ['deploy.config.json', 'public/deploy.config.json', 'deploy.env.json']) {
+//
+// 这三个文件名都属于「环境相关配置」，一律不入库：里面写的是具体主机名，
+// 换一个部署目标就失效，放进公开仓库还会泄露内网域名。仓库里只保留
+// deploy.env.example.json 作为模板。dir 参数只为测试可注入。
+const DEPLOY_CONFIG_FILES = ['deploy.config.json', 'public/deploy.config.json', 'deploy.env.json'];
+function deployEnvDefaults(dir = __dirname) {
+  for (const relative of DEPLOY_CONFIG_FILES) {
     let parsed;
-    try { parsed = JSON.parse(fs.readFileSync(path.join(__dirname, relative), 'utf8')); } catch { continue; }
+    try { parsed = JSON.parse(fs.readFileSync(path.join(dir, relative), 'utf8')); } catch { continue; }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
     const values = parsed.env;
     if (!values || typeof values !== 'object' || Array.isArray(values)) continue;

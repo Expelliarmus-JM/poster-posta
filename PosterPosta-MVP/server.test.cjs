@@ -360,17 +360,34 @@ test('默认只监听回环；HOST=0.0.0.0 时仍由 ALLOWED_HOSTS 决定哪些�
   assert.throws(() => createApp({ dbPath: ':memory:', env: { APP_ENV: 'development', ALLOWED_HOSTS: 'https://bad.example.test' } }), /ALLOWED_HOSTS/);
 });
 
-test('deploy.env.json 只作为默认值，不覆盖显式传入或真实环境变量', async t => {
-  const defaults = deployEnvDefaults();
-  assert.equal(defaults.APP_ENV, 'development');
-  assert.equal(defaults.HOST, '0.0.0.0');
-  // 托管环境的反向代理转发的是内部主机名、而不是公开域名，所以两个都要配：
-  // ALLOWED_HOSTS 覆盖内部域名（过 Host 校验），PUBLIC_ORIGIN 是公开访问域名（过浏览器 Origin 校验）。
-  // 只配 PUBLIC_ORIGIN 会被 HOST_FORBIDDEN 拒绝，只配 ALLOWED_HOSTS 会被 CSRF_ORIGIN 拒绝。
-  assert.match(defaults.PUBLIC_ORIGIN, /^https:\/\/[a-z0-9-]+\.app-tencent\.workbuddy\.host$/);
-  assert.equal(defaults.ALLOWED_HOSTS, '*.internal.invalid');
+test('部署参数文件只作为默认值，不覆盖显式传入或真实环境变量', async t => {
+  // 仓库里不保留任何环境相关的部署配置：里面写的是具体主机名，换部署目标就失效，
+  // 放进公开仓库还会泄露内网域名。这里断言仓库确实是干净的。
+  for (const relative of ['deploy.config.json', 'public/deploy.config.json', 'deploy.env.json']) {
+    assert.equal(fs.existsSync(path.join(__dirname, relative)), false, `${relative} 不应入库（模板见 deploy.env.example.json）`);
+  }
+  assert.deepEqual(deployEnvDefaults(), {}, '仓库内不应存在提交过的部署参数');
 
-  // 显式传入 env 时完全忽略该文件，测试与本地默认行为不被部署参数污染。
+  // 用临时目录注入一份，验证读取优先级与文件名顺序：托管环境的反向代理转发的是
+  // 内部主机名而不是公开域名，所以 ALLOWED_HOSTS 与 PUBLIC_ORIGIN 通常要分开配。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pp-deploy-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(dir, 'public'));
+  fs.writeFileSync(path.join(dir, 'deploy.config.json'), JSON.stringify({
+    note: '注释与非法条目都应被忽略',
+    env: { APP_ENV: 'development', HOST: '0.0.0.0', PUBLIC_ORIGIN: 'https://demo.example.test', ALLOWED_HOSTS: '*.internal.example.test', 'bad key': 'x', PORT: 4180 }
+  }));
+  fs.writeFileSync(path.join(dir, 'public', 'deploy.config.json'), JSON.stringify({ env: { HOST: '127.0.0.1', PUBLIC_ORIGIN: 'https://ignored.example.test' } }));
+  const defaults = deployEnvDefaults(dir);
+  assert.deepEqual(defaults, {
+    APP_ENV: 'development', HOST: '0.0.0.0',
+    PUBLIC_ORIGIN: 'https://demo.example.test', ALLOWED_HOSTS: '*.internal.example.test'
+  });
+  // 前一个文件命中就不再往后看；env 里没有合法键时视为未命中。
+  fs.writeFileSync(path.join(dir, 'deploy.config.json'), JSON.stringify({ env: {} }));
+  assert.deepEqual(deployEnvDefaults(dir), { HOST: '127.0.0.1', PUBLIC_ORIGIN: 'https://ignored.example.test' });
+
+  // 显式传入 env 时完全忽略这些文件，测试与本地默认行为不被部署参数污染。
   const explicit = createApp({ dbPath: ':memory:', env: { APP_ENV: 'development' } });
   t.after(() => explicit.close());
   assert.equal(explicit.config.bindHost, '127.0.0.1');
