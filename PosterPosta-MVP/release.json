@@ -1,6 +1,6 @@
 {
   "product": "PosterPosta",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "stage": "已发布到演示沙箱的可运行后端MVP，不是已上线商业产品",
   "runtime": "Node.js >=22.22.2，零外部运行依赖；node:sqlite 在当前运行时仍有实验性警告",
   "start": "本地：在项目目录执行 npm start，默认只监听 http://127.0.0.1:4180，仅本机可访问",
@@ -14,7 +14,11 @@
   "configuration": ".env.example 是配置模板，实际凭据只能放未入库的 .env 或服务器环境变量；deploy.config.json 只放非敏感部署参数",
   "database": "开发 data/development.sqlite 与生产 data/production.sqlite 默认隔离，可用 DB_PATH 指定绝对路径；ZIP不包含数据库和测试账户",
   "implemented": [
-    "邮箱随机OTP、有效期、尝试上限、按邮箱限流（生产再加出口IP维度）、会话哈希与HttpOnly Cookie",
+    "邮箱随机OTP登录（新邮箱自动注册）、有效期、尝试上限、按邮箱限流（生产再加出口IP维度）、会话哈希与HttpOnly Cookie",
+    "可选密码登录：scrypt加盐、字母+数字8–128位、15分钟错5次锁15分钟、不存在账号也走假哈希防探测",
+    "多邮箱绑定：每账号最多5个、验证码确认、全局唯一、切换主邮箱、主邮箱不可解绑；寄给任一已绑定邮箱的信都能签收",
+    "敏感操作二次验证（主邮箱验证码或密码，15分钟有效）、登录设备列表与下线、改密码自动下线其他设备、昵称修改",
+    "旧库自动迁移：补列并把已有用户邮箱写入 user_emails",
     "SQLite真实持久化、多账户隔离、服务端城市资格与资产所有权验证",
     "免费名额跨城市唯一、附赠邮票、原子消耗、市场并发交易单胜者",
     "开发显式沙盒购买；生产支付未接入时禁止付费发货",
@@ -38,12 +42,13 @@
     "上传对象存储、分页/配额、监控报警、备份恢复、负载与安全评审"
   ],
   "verification": {
-    "backend_tests_passed": 43,
+    "backend_tests_passed": 52,
     "backend_tests_failed": 0,
     "frontend_browser": "双账户寄送签收聊天、市集购买、上传审核和草稿隔离已验收；演示沙箱上复核了注册、免费领取、距离估算、寄信原子消耗与刷新后数据库恢复",
     "live_two_party_flow": "verify-live.mjs 在演示沙箱跑通：沙盒购买→寄信 transit(8个工作日)→发件人持链接读取被拒(CLAIM_EMAIL_MISMATCH)→匿名预览仅返回 fromName 与脱敏邮箱→模拟投递 delivered→收件人邮箱验证后签收 received 且资产转移→重复签收 409→双方看到同一段对话→已签收卡片转售被拒(ASSET_NOT_UNUSED)。全程未发送真实邮件",
     "sandbox_rate_limit": "演示沙箱所有访客共用同一出口IP，原先按IP限流会让同时体验的人互相卡住；已改为开发环境只按邮箱限流（生产仍保留IP维度），本机验证同一IP下不同邮箱可连续注册、同一邮箱重复仍 429",
-    "production_services": "未配置，未实网验收"
+    "production_services": "未配置，未实网验收",
+    "account_browser": "本机开发模式验收：新邮箱验证码注册并补昵称、发送验证码60秒倒计时、绑定第二邮箱、设置密码与弱密码拦截、会话过期后解绑触发二次验证（错密码提示、正确密码后自动继续）、命令行密码登录出现第二台设备并在浏览器下线、退出后密码登录、390px 宽度无横向溢出"
   },
   "official_references": [
     "https://resend.com/docs/api-reference/emails/send-email",

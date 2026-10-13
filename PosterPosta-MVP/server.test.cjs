@@ -120,6 +120,15 @@ async function listedCard(actor, price = 23.45) {
   const listing = ok(await actor.action('listAsset', asset.id, price, '真实资产，沙盒交易'));
   return { asset, listing };
 }
+async function bindEmail(actor, email) {
+  const sent = ok(await actor.call('/api/account/emails/request', { email }));
+  return ok(await actor.call('/api/account/emails/verify', { email, code: sent.devCode }));
+}
+async function reauth(actor) {
+  const sent = ok(await actor.call('/api/auth/reauth/request', {}));
+  return ok(await actor.call('/api/auth/reauth/verify', { code: sent.devCode }));
+}
+const FIFTEEN_MINUTES = 15 * 60 * 1000;
 function temporaryDB(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'posterposta-test-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
@@ -1024,4 +1033,244 @@ test('签收回滚保证卡片不丢失；收件方保留必要的原创邮票�
   assert.ok(response.data.bootstrap.products.find(p => p.id === stampWork.productId));
   assert.deepEqual(response.data.bootstrap.state.creations, []);
   error(await recipient.call('/api/claim', { token: letter.sandboxClaimToken }), 409, 'ALREADY_CLAIMED');
+});
+
+// ---------------- 账号体系：登录、绑定邮箱、密码、二次验证、设备 ----------------
+
+test('两步登录：新邮箱缺昵称时不消耗验证码，老账号免填昵称；昵称可修改且校验', async t => {
+  const f = await fixture(t);
+  const a = f.browser();
+  const code = ok(await a.call('/api/auth/request', { email: 'fresh@example.test' })).devCode;
+  error(await a.call('/api/auth/verify', { email: 'fresh@example.test', code }), 400, 'NAME_REQUIRED');
+  error(await a.call('/api/auth/verify', { email: 'fresh@example.test', code, name: '   ' }), 400, 'NAME_REQUIRED');
+  assert.equal(f.db.prepare('SELECT count(*) AS n FROM users').get().n, 0);
+  assert.equal(f.db.prepare('SELECT consumed_at FROM otps').get().consumed_at, null);
+  const user = ok(await a.call('/api/auth/verify', { email: 'fresh@example.test', code, name: '新朋友' }));
+  assert.equal(user.name, '新朋友');
+  const b = f.browser();
+  const again = ok(await b.call('/api/auth/request', { email: 'fresh@example.test' })).devCode;
+  assert.equal(ok(await b.call('/api/auth/verify', { email: 'fresh@example.test', code: again })).id, user.id);
+  error(await b.call('/api/account/profile', { name: '' }), 400, 'INVALID_INPUT');
+  error(await b.call('/api/account/profile', { name: 'a\tb' }), 400, 'INVALID_INPUT');
+  assert.equal(ok(await b.call('/api/account/profile', { name: '改名后' })).name, '改名后');
+  assert.equal((await a.state()).user.name, '改名后');
+  error(await f.browser().call('/api/account/profile', { name: 'x' }), 401, 'AUTH_REQUIRED');
+  const account = (await a.state()).account;
+  assert.deepEqual(Object.keys(account).sort(), ['createdAt', 'email', 'emails', 'hasPassword', 'id', 'maxEmails', 'name', 'passwordChangedAt', 'verifiedUntil']);
+  assert.equal(account.verifiedUntil, new Date(Date.parse('2026-09-14T08:00:00Z') + FIFTEEN_MINUTES).toISOString());
+});
+
+test('一个账号绑定多个邮箱：任一邮箱可登录与签收，邮箱全局唯一，主邮箱可换不可解绑', async t => {
+  const f = await fixture(t);
+  const me = f.browser();
+  const other = f.browser();
+  const sender = f.browser();
+  const user = await me.login('home@example.test', '我');
+  await other.login('other@example.test', '别人');
+  await sender.login('sender@example.test', '寄件人');
+  error(await me.call('/api/account/emails/request', { email: 'home@example.test' }), 409, 'EMAIL_ALREADY_BOUND');
+  error(await me.call('/api/account/emails/request', { email: 'other@example.test' }), 409, 'EMAIL_TAKEN');
+  const sent = ok(await me.call('/api/account/emails/request', { email: 'Work@Example.test' }));
+  assert.match(sent.devCode, /^\d{6}$/);
+  assert.equal(sent.sentTo, 'w***@e***.test');
+  error(await me.call('/api/account/emails/verify', { email: 'work@example.test', code: sent.devCode === '000000' ? '111111' : '000000' }), 400, 'CODE_INVALID_OR_EXPIRED');
+  // 验证码按账号隔离：别人拿到这个码也不能把邮箱绑到自己名下。
+  error(await other.call('/api/account/emails/verify', { email: 'work@example.test', code: sent.devCode }), 400, 'CODE_INVALID_OR_EXPIRED');
+  const account = ok(await me.call('/api/account/emails/verify', { email: 'work@example.test', code: sent.devCode }));
+  assert.deepEqual(account.emails.map(e => [e.email, e.primary]), [['home@example.test', true], ['work@example.test', false]]);
+  assert.equal((await f.browser().login('work@example.test')).id, user.id);
+
+  const pair = await freePair(sender);
+  const letter = ok(await sender.action('sendLetter', letterInput(pair, { toEmail: 'work@example.test' })));
+  assert.equal(letter.role, 'sender');
+  f.setTime(letter.eta);
+  await f.runWorker();
+  const claimed = ok(await me.call('/api/claim', { token: letter.sandboxClaimToken }));
+  assert.equal(claimed.role, 'recipient');
+  assert.equal((await me.state()).letters[0].role, 'recipient');
+  assert.equal((await sender.state()).letters[0].role, 'sender');
+  const mine = await freePair(me);
+  error(await me.action('sendLetter', letterInput(mine, { toEmail: 'work@example.test' })), 400, 'SELF_RECIPIENT');
+
+  // 寄信 ETA 已过去好几天，换主邮箱、解绑都要先二次验证。
+  error(await me.call('/api/account/emails/primary', { email: 'work@example.test' }), 403, 'REAUTH_REQUIRED');
+  ok(await me.call('/api/auth/reauth/request', {}));
+  error(await me.call('/api/auth/reauth/verify', { code: 'abc' }), 400, 'CODE_INVALID_OR_EXPIRED');
+  await reauth(me);
+  assert.equal(ok(await me.call('/api/account/emails/primary', { email: 'work@example.test' })).email, 'work@example.test');
+  assert.equal((await me.state()).user.email, 'work@example.test');
+  error(await me.call('/api/account/emails/remove', { email: 'work@example.test' }), 409, 'PRIMARY_EMAIL');
+  error(await me.call('/api/account/emails/primary', { email: 'other@example.test' }), 404, 'EMAIL_NOT_BOUND');
+  const stale = ok(await f.browser().call('/api/auth/request', { email: 'home@example.test' })).devCode;
+  assert.deepEqual(ok(await me.call('/api/account/emails/remove', { email: 'home@example.test' })).emails.map(e => e.email), ['work@example.test']);
+  error(await f.browser().call('/api/auth/verify', { email: 'home@example.test', code: stale, name: '抢注' }), 400, 'OTP_INVALID_OR_EXPIRED');
+  await reauth(other);
+  await bindEmail(other, 'home@example.test');
+  assert.equal((await me.state()).letters[0].status, 'received');
+  assert.equal((await me.state()).assets.find(a => a.id === pair.card.id).status, 'received');
+});
+
+test('每个账号最多绑定 5 个邮箱；绑定验证码 10 分钟过期、5 次错误锁定', async t => {
+  const f = await fixture(t);
+  const a = f.browser();
+  await a.login('a0@example.test', '甲');
+  for (let i = 1; i < 5; i++) await bindEmail(a, `a${i}@example.test`);
+  assert.equal((await a.state()).account.emails.length, 5);
+  error(await a.call('/api/account/emails/request', { email: 'a5@example.test' }), 409, 'EMAIL_LIMIT');
+  ok(await a.call('/api/account/emails/remove', { email: 'a4@example.test' }));
+  const sent = ok(await a.call('/api/account/emails/request', { email: 'a5@example.test' }));
+  const wrong = sent.devCode === '000000' ? '111111' : '000000';
+  for (let i = 0; i < 4; i++) error(await a.call('/api/account/emails/verify', { email: 'a5@example.test', code: wrong }), 400, 'CODE_INVALID_OR_EXPIRED');
+  error(await a.call('/api/account/emails/verify', { email: 'a5@example.test', code: wrong }), 429, 'CODE_LOCKED');
+  error(await a.call('/api/account/emails/verify', { email: 'a5@example.test', code: sent.devCode }), 429, 'CODE_LOCKED');
+  const resent = ok(await a.call('/api/account/emails/request', { email: 'a5@example.test' }));
+  f.advance(10 * 60 * 1000);
+  error(await a.call('/api/account/emails/verify', { email: 'a5@example.test', code: resent.devCode }), 400, 'CODE_INVALID_OR_EXPIRED');
+  assert.equal((await a.state()).account.emails.length, 4);
+});
+
+test('可选密码：须近期验证才能设置，scrypt 存储，五次错误锁定 15 分钟且不暴露账号是否存在', async t => {
+  const f = await fixture(t);
+  const a = f.browser();
+  await a.login('pw@example.test', '密码用户');
+  error(await a.call('/api/account/password', { password: 'short1' }), 400, 'INVALID_PASSWORD');
+  error(await a.call('/api/account/password', { password: 'onlyletters' }), 400, 'INVALID_PASSWORD');
+  f.advance(FIFTEEN_MINUTES + 1);
+  error(await a.call('/api/account/password', { password: 'Postcard2026' }), 403, 'REAUTH_REQUIRED');
+  await reauth(a);
+  const other = f.browser();
+  await other.login('pw@example.test');
+  const set = ok(await a.call('/api/account/password', { password: 'Postcard2026' }));
+  assert.equal(set.hasPassword, true);
+  assert.equal(set.revokedSessions, 1);
+  assert.equal((await other.state()).user, null);
+  const stored = f.db.prepare('SELECT password_hash FROM users').get().password_hash;
+  assert.match(stored, /^scrypt\$16384\$8\$1\$/);
+  assert.equal(stored.includes('Postcard2026'), false);
+
+  const b = f.browser();
+  const user = ok(await b.call('/api/auth/password', { email: 'PW@example.test', password: 'Postcard2026' }));
+  assert.deepEqual(Object.keys(user).sort(), ['email', 'id', 'name']);
+  assert.ok((await b.state()).account.verifiedUntil);
+
+  const c = f.browser();
+  const unknown = await c.call('/api/auth/password', { email: 'nobody@example.test', password: 'Postcard2026' });
+  const wrong = () => c.call('/api/auth/password', { email: 'pw@example.test', password: 'Wrong20260' });
+  const right = () => c.call('/api/auth/password', { email: 'pw@example.test', password: 'Postcard2026' });
+  error(unknown, 400, 'INVALID_CREDENTIALS');
+  const first = await wrong();
+  error(first, 400, 'INVALID_CREDENTIALS');
+  assert.equal(unknown.data.error, first.data.error);
+  error(await c.call('/api/auth/password', { email: 'pw@example.test', password: { toString: 1 } }), 400, 'INVALID_CREDENTIALS');
+  for (let i = 0; i < 2; i++) error(await wrong(), 400, 'INVALID_CREDENTIALS');
+  error(await wrong(), 429, 'LOGIN_LOCKED');
+  error(await right(), 429, 'LOGIN_LOCKED');
+  f.advance(LOCK_MINUTES_MS());
+  ok(await right());
+
+  f.advance(FIFTEEN_MINUTES + 1);
+  error(await c.call('/api/account/password', { password: 'Another2027', currentPassword: 'bad-password1' }), 400, 'INVALID_CREDENTIALS');
+  assert.equal(ok(await c.call('/api/account/password', { password: 'Another2027', currentPassword: 'Postcard2026' })).revokedSessions, 2);
+  assert.equal((await a.state()).user, null);
+  assert.equal((await b.state()).user, null);
+  error(await f.browser().call('/api/auth/password', { email: 'pw@example.test', password: 'Postcard2026' }), 400, 'INVALID_CREDENTIALS');
+  ok(await c.call('/api/account/password/remove', {}));
+  assert.equal((await c.state()).account.hasPassword, false);
+  error(await f.browser().call('/api/auth/password', { email: 'pw@example.test', password: 'Another2027' }), 400, 'INVALID_CREDENTIALS');
+  error(await c.call('/api/auth/reauth/verify', { password: 'Another2027' }), 409, 'NO_PASSWORD');
+});
+function LOCK_MINUTES_MS() { return 15 * 60 * 1000 + 1; }
+
+test('邮箱验证码登录会清掉该邮箱的密码失败计数；二次验证也可以用密码', async t => {
+  const f = await fixture(t);
+  const a = f.browser();
+  await a.login('mix@example.test', '混合');
+  ok(await a.call('/api/account/password', { password: 'Mixed12345' }));
+  const c = f.browser();
+  for (let i = 0; i < 4; i++) error(await c.call('/api/auth/password', { email: 'mix@example.test', password: 'Nope123456' }), 400, 'INVALID_CREDENTIALS');
+  await c.login('mix@example.test');
+  error(await f.browser().call('/api/auth/password', { email: 'mix@example.test', password: 'Nope123456' }), 400, 'INVALID_CREDENTIALS');
+  f.advance(FIFTEEN_MINUTES + 1);
+  error(await a.call('/api/account/emails/request', { email: 'mix2@example.test' }), 403, 'REAUTH_REQUIRED');
+  error(await a.call('/api/auth/reauth/verify', { password: 'Wrong123456' }), 400, 'INVALID_CREDENTIALS');
+  ok(await a.call('/api/auth/reauth/verify', { password: 'Mixed12345' }));
+  ok(await a.call('/api/account/emails/request', { email: 'mix2@example.test' }));
+});
+
+test('登录设备：识别设备、标记当前，可单独下线或下线其他全部，当前设备不能自踢', async t => {
+  const f = await fixture(t);
+  const phone = f.browser('', { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Version/17.0 Mobile/15E148 Safari/604.1' });
+  const laptop = f.browser('', { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36' });
+  const tablet = f.browser('', { 'User-Agent': 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/128.0 Mobile Safari/537.36' });
+  await phone.login('device@example.test', '设备');
+  f.advance(1000);
+  await laptop.login('device@example.test');
+  f.advance(1000);
+  await tablet.login('device@example.test');
+  const list = ok(await laptop.call('/api/account/sessions'));
+  assert.equal(list.length, 3);
+  assert.deepEqual(list.map(s => s.device).sort(), ['Chrome · Android', 'Chrome · macOS', 'Safari · iOS']);
+  assert.deepEqual(list.filter(s => s.current).map(s => s.device), ['Chrome · macOS']);
+  assert.equal(JSON.stringify(list).includes(laptop.cookie.split('=')[1]), false);
+  error(await laptop.call('/api/account/sessions/revoke', { id: list.find(s => s.current).id }), 400, 'CURRENT_SESSION');
+  error(await laptop.call('/api/account/sessions/revoke', { id: 'zz' }), 400, 'INVALID_INPUT');
+  const phoneId = list.find(s => s.device === 'Safari · iOS').id;
+  assert.equal(ok(await laptop.call('/api/account/sessions/revoke', { id: phoneId })).sessions.length, 2);
+  assert.equal((await phone.state()).user, null);
+  error(await laptop.call('/api/account/sessions/revoke', { id: phoneId }), 404, 'SESSION_NOT_FOUND');
+  error(await f.browser().call('/api/account/sessions'), 401, 'AUTH_REQUIRED');
+  f.advance(FIFTEEN_MINUTES + 1);
+  error(await laptop.call('/api/account/sessions/revoke', { others: true }), 403, 'REAUTH_REQUIRED');
+  await reauth(laptop);
+  assert.equal(ok(await laptop.call('/api/account/sessions/revoke', { others: true })).revoked, 1);
+  assert.equal((await tablet.state()).user, null);
+  assert.equal((await laptop.state()).user.email, 'device@example.test');
+});
+
+test('生产环境绑定与二次验证码只走邮件、不回传明文', async t => {
+  const f = await fixture(t, { env: PROD });
+  const a = f.browser();
+  await a.login('prod@example.test', '生产');
+  const sent = ok(await a.call('/api/account/emails/request', { email: 'second@example.test' }));
+  assert.equal(sent.devCode, undefined);
+  assert.equal(sent.emailSent, true);
+  const mail = f.mails.at(-1);
+  assert.equal(mail.to, 'second@example.test');
+  assert.match(mail.subject, /绑定邮箱/);
+  ok(await a.call('/api/account/emails/verify', { email: 'second@example.test', code: mail.text.match(/验证码是 (\d{6})/)[1] }));
+  const re = ok(await a.call('/api/auth/reauth/request', {}));
+  assert.equal(re.devCode, undefined);
+  assert.equal(f.mails.at(-1).to, 'prod@example.test');
+  assert.match(f.mails.at(-1).subject, /身份验证/);
+});
+
+test('旧版数据库启动即迁移：补列、主邮箱进入绑定表，原会话可用但敏感操作需先验证', async t => {
+  const dbPath = temporaryDB(t);
+  const { DatabaseSync } = require('node:sqlite');
+  const legacyDB = new DatabaseSync(dbPath);
+  legacyDB.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+      claimed_free INTEGER NOT NULL DEFAULT 0 CHECK(claimed_free IN (0,1)), created_at TEXT NOT NULL) STRICT;
+    CREATE TABLE sessions (token_hash BLOB PRIMARY KEY, user_id TEXT REFERENCES users(id), location TEXT,
+      created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;`);
+  const token = crypto.randomBytes(32).toString('base64url');
+  const at = Date.parse('2026-09-14T08:00:00Z');
+  legacyDB.prepare('INSERT INTO users VALUES(?,?,?,0,?)').run('user-legacy', 'legacy@example.test', '老用户', '2026-09-01T00:00:00.000Z');
+  legacyDB.prepare('INSERT INTO sessions VALUES(?,?,?,?,?)').run(digest(token), 'user-legacy', 'tokyo', at, at + 86400000);
+  legacyDB.close();
+  const first = await fixture(t, { dbPath });
+  const columns = new Set(first.db.prepare('PRAGMA table_info(sessions)').all().map(c => c.name));
+  for (const name of ['verified_at', 'user_agent', 'last_seen_at']) assert.ok(columns.has(name), name);
+  const legacy = first.browser(`pp_session=${token}`);
+  const state = await legacy.state();
+  assert.equal(state.user.id, 'user-legacy');
+  assert.deepEqual(state.account.emails.map(e => [e.email, e.primary]), [['legacy@example.test', true]]);
+  assert.equal(state.account.hasPassword, false);
+  assert.equal(state.account.verifiedUntil, null);
+  error(await legacy.call('/api/account/emails/request', { email: 'new@example.test' }), 403, 'REAUTH_REQUIRED');
+  assert.equal((await first.browser().login('legacy@example.test')).id, 'user-legacy');
+  await first.close();
+  const second = await fixture(t, { dbPath });
+  assert.equal(second.db.prepare('SELECT count(*) AS n FROM user_emails').get().n, 1);
+  assert.equal((await second.browser(`pp_session=${token}`).state()).user.id, 'user-legacy');
 });

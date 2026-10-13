@@ -40,8 +40,12 @@ const development = () => PP.config.development === true;
 const city = id => PP.cities[id] || {name:'定位未确认',en:'UNKNOWN',country:'城市未知'};
 const hasLocation = () => Boolean(PP.cities[PP.state.location]);
 const canChat = l => l.status === 'received' || (development() && l.sandbox && l.status === 'delivered');
-const isRecipient = l => Boolean(PP.state.user && l.toEmail.toLowerCase() === PP.state.user.email.toLowerCase());
-const isSender = l => Boolean(PP.state.user && l.fromEmail.toLowerCase() === PP.state.user.email.toLowerCase());
+// 收发方身份由服务器按账号判定：账号可绑定多个邮箱、主邮箱也能更换，不能再拿邮箱字符串比较。
+const isRecipient = l => Boolean(PP.state.user && l.role === 'recipient');
+const isSender = l => Boolean(PP.state.user && l.role === 'sender');
+const ownsEmail = email => Boolean(PP.account?.emails?.some(e => e.email === String(email || '').trim().toLowerCase()));
+const fresh = () => Boolean(PP.account?.verifiedUntil && Date.parse(PP.account.verifiedUntil) > Date.now());
+const dateTime = s => new Date(s).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
 const landingURL = new URL(location.href);
 const claimToken = landingURL.searchParams.get('claim');
 if(landingURL.searchParams.has('claim')){
@@ -62,6 +66,19 @@ let filter='all', marketType='all', marketCity='all', marketSort='new', marketSe
 let localUserId=PP.state.user?.id || null;
 let favorites=storage.get('posterposta-favorites',[]), compose=null, creationImage='', afterLogin=null, activeModal=null, toastTimer=null, lastFocus=null;
 let busy=false, claimState={loading:true}, uploadVersion=0;
+// 账号体系的页面状态：登录方式、新邮箱补昵称、绑定草稿、二次验证后要续做的动作、待确认的危险操作。
+let loginMode='code', loginNeedName=false, bindDraft=null, reauthMode='code', pendingReauth=null, reauthBack=null, pendingConfirm=null;
+const cooldowns={};let cooldownTimer=null;
+function startCooldown(key,ms=60000){cooldowns[key]=Date.now()+ms;setTimeout(tickCooldowns,0);if(!cooldownTimer)cooldownTimer=setInterval(tickCooldowns,1000);}
+function tickCooldowns(){
+ document.querySelectorAll('[data-cooldown]').forEach(b=>{
+  if(!b.dataset.label)b.dataset.label=b.textContent;
+  const left=Math.ceil(((cooldowns[b.dataset.cooldown]||0)-Date.now())/1000);
+  if(left>0){b.disabled=true;b.textContent=`${left}s 后可重发`;}
+  else if(b.textContent!==b.dataset.label){b.disabled=false;b.textContent=b.dataset.label;}
+ });
+ if(cooldownTimer&&Object.values(cooldowns).every(t=>t<=Date.now())){clearInterval(cooldownTimer);cooldownTimer=null;}
+}
 if(claimToken!==null)view='claim';
 const main=$('#main');
 function syncIdentity(){
@@ -149,7 +166,7 @@ function messages(){
 function profile(){
  const u=PP.state.user,assets=PP.ownAssets();
  const visible=profileType==='favorites'?favorites.map(id=>PP.products.find(p=>p.id===id)).filter(Boolean):assets.filter(a=>PP.product(a.productId).type===(profileType==='stamps'?'stamp':'card')&&(profileType==='stamps'?a.status==='unused':a.status===assetTab));
- return `<div class="eyebrow">YOUR PERSONAL POST OFFICE</div><div class="profile-header"><div class="profile-avatar">${u?esc(Array.from(u.name)[0]):'P'}</div><div><h1>${u?esc(u.name):'你好，旅行者。'}</h1><p>${u?esc(u.email):'用一个邮箱，收藏你的整个世界。'}</p>${!u?'<button class="text-link" data-action="login">注册 / 登录 ↗</button>':''}</div><button class="icon-button" data-action="settings" aria-label="设置">${icon('settings')}</button></div>
+ return `<div class="eyebrow">YOUR PERSONAL POST OFFICE</div><div class="profile-header"><div class="profile-avatar">${u?esc(Array.from(u.name)[0]):'P'}</div><div><h1>${u?esc(u.name):'你好，旅行者。'}</h1><p>${u?esc(u.email):'用一个邮箱，收藏你的整个世界。'}</p>${!u?'<button class="text-link" data-action="login">注册 / 登录 ↗</button>':'<button class="text-link" data-action="account-center">账号与安全 ↗</button>'}</div><button class="icon-button" data-action="settings" aria-label="设置">${icon('settings')}</button></div>
  <div class="profile-stats"><div class="profile-stat"><strong>${assets.filter(a=>PP.product(a.productId).type==='card'&&['unused','received','listed'].includes(a.status)).length}</strong><span>珍藏的明信片</span></div><div class="profile-stat"><strong>${assets.filter(a=>PP.product(a.productId).type==='stamp'&&a.status==='unused').length}</strong><span>未使用邮票</span></div><div class="profile-stat"><strong>${PP.state.letters.filter(isSender).length}</strong><span>寄出的心意</span></div><div class="profile-stat"><strong>${new Set(assets.filter(a=>['unused','received','listed'].includes(a.status)).map(a=>PP.product(a.productId).city)).size}</strong><span>收集的城市</span></div></div>
  <div class="tabs">${[['cards','明信片'],['stamps','邮票册'],['favorites','我喜欢的']].map(([id,label])=>`<button class="tab ${profileType===id?'active':''}" data-action="profile-type" data-id="${id}">${label}${id==='favorites'?`<span class="tab-count">${favorites.length}</span>`:''}</button>`).join('')}</div>
  <div class="profile-controls">${profileType==='cards'?`<div class="filter-row">${[['unused','未使用'],['received','已签收'],['listed','上架中'],['sent','已寄出']].map(([id,label])=>`<button class="chip ${assetTab===id?'active':''}" data-action="asset-tab" data-id="${id}">${label}</button>`).join('')}</div>`:`<p class="inbox-subtitle" style="margin:0">${profileType==='stamps'?'邮票册只展示未使用邮票；已贴用的邮票保存在寄信记录里。':'喜欢不代表拥有，点开作品即可查看获取方式。'}</p>`}<button class="tip-button" data-action="rules">${icon('info')} 数字资产规则</button></div>
@@ -168,24 +185,91 @@ function creator(){
 function modal(title,html,wide=false,kind='generic',id=null){
  lastFocus=document.activeElement;activeModal={kind,id};document.body.style.overflow='hidden';
  $('#modal-root').innerHTML=`<div class="modal-backdrop"><section class="modal ${wide?'wide':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header class="modal-head"><div><div class="eyebrow">POSTERPOSTA</div><h2 id="modal-title">${title}</h2></div><button class="icon-button" data-action="close" aria-label="关闭弹窗">${icon('close')}</button></header><div class="modal-body">${html}</div></section></div>`;
+ tickCooldowns();
  setTimeout(()=>{const target=$('.modal input:not([type="checkbox"]):not([type="file"]):not(:disabled)') || $('.modal .icon-button');target?.focus({preventScroll:true});},60);
 }
 function closeModal(force=false){
  if(activeModal?.kind==='compose'&&!force){captureCompose();if(compose&&storage.set('posterposta-draft',compose))toast('草稿已保存到当前账号的浏览器空间');}
  if(activeModal?.kind==='create'){creationImage='';uploadVersion++;}
- $('#modal-root').innerHTML='';document.body.style.overflow='';activeModal=null;afterLogin=null;lastFocus?.focus?.({preventScroll:true});
+ $('#modal-root').innerHTML='';document.body.style.overflow='';activeModal=null;afterLogin=null;pendingReauth=null;reauthBack=null;pendingConfirm=null;lastFocus?.focus?.({preventScroll:true});
 }
 async function requireLogin(fn){if(PP.state.user)return await fn();afterLogin=fn;loginModal();}
-function loginModal(){
+function loginModal(prefill={}){
  if(view==='claim'&&!afterLogin)afterLogin=loadClaim;
- const a=PP.state.user;
- modal('用邮箱，开启你的旅程',`<div class="signin-art">${icon('mail')}<div><h3>A letter starts here.</h3><p>新邮箱自动注册，已有邮箱登录原账号。</p></div></div>
- <form id="login-form"><label class="field"><span class="field-label">你的昵称</span><input name="name" autocomplete="nickname" maxlength="50" value="${esc(a?.name||'')}" placeholder="怎么称呼你" required></label>
- <label class="field"><span class="field-label">邮箱地址</span><input name="email" type="email" autocomplete="email" value="${esc(a?.email||'')}" placeholder="you@example.com" required></label>
- <label class="field"><span class="field-label">邮箱验证码${development()?'<small>开发沙盒</small>':''}</span><div class="code-row"><input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="6 位验证码" required><button type="button" class="secondary" data-action="show-code">获取验证码</button></div></label>
- <p id="otp-note" class="field-hint" role="status">${development()?'服务器生成随机验证码，开发环境不发送邮件；这不能证明真实邮箱所有权。':'验证码将发送到填写的邮箱，请查收后输入；不要转发验证码。'}</p>
- <label class="check-row"><input type="checkbox" name="consent" required><span>我已了解邮箱用于账号与投递，账号、作品和消息会保存到服务器数据库。${development()?'当前为开发沙盒，不发送邮件、不收付款；请使用测试资料。':''}</span></label>
- <div id="form-error" class="inline-error" role="alert"></div><button class="primary full-width" type="submit">验证并注册 / 登录 ${icon('arrow')}</button><p class="auth-note">验证码 10 分钟内有效 · 无需设置密码<br>可退出后使用其他邮箱登录，各账号的收藏与本地草稿独立。</p></form>`,false,'login');
+ const email=prefill.email??'';
+ const tabs=`<div class="tabs auth-tabs" role="tablist">${[['code','邮箱验证码'],['password','密码登录']].map(([id,label])=>`<button type="button" class="tab ${loginMode===id?'active':''}" role="tab" aria-selected="${loginMode===id}" data-action="login-mode" data-id="${id}">${label}</button>`).join('')}</div>`;
+ const note=prefill.note||(development()?'服务器生成随机验证码，开发环境不发送邮件；这不能证明真实邮箱所有权。':'验证码将发送到填写的邮箱，请查收后输入；不要转发验证码。');
+ const codeForm=`<form id="login-form"><label class="field"><span class="field-label">邮箱地址</span><input name="email" type="email" autocomplete="email" value="${esc(email)}" placeholder="you@example.com" required></label>
+ <label class="field"><span class="field-label">邮箱验证码${development()?'<small>开发沙盒</small>':''}</span><div class="code-row"><input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="6 位验证码" value="${esc(prefill.code||'')}" required><button type="button" class="secondary" data-action="show-code" data-cooldown="login">获取验证码</button></div></label>
+ <p id="otp-note" class="field-hint" role="status">${esc(note)}</p>
+ ${loginNeedName?`<div class="notice warm">${icon('spark')}<span>这是一个新邮箱，还没有 PosterPosta 账号。起个昵称，就用刚才的验证码完成注册。</span></div><label class="field"><span class="field-label">你的昵称 <small>注册后可在「账号与安全」修改</small></span><input name="name" autocomplete="nickname" maxlength="50" placeholder="怎么称呼你" required></label>`:''}
+ <label class="check-row"><input type="checkbox" name="consent" ${prefill.consent?'checked':''} required><span>我已了解邮箱用于账号与投递，账号、作品和消息会保存到服务器数据库。${development()?'当前为开发沙盒，不发送邮件、不收付款；请使用测试资料。':''}</span></label>
+ <div id="form-error" class="inline-error" role="alert"></div><button class="primary full-width" type="submit">${loginNeedName?'完成注册':'验证并登录'} ${icon('arrow')}</button><p class="auth-note">新邮箱验证后自动注册，已有邮箱直接登录原账号 · 验证码 10 分钟内有效<br>登录后可在「账号与安全」设置密码、绑定更多邮箱、管理登录设备。</p></form>`;
+ const passwordForm=`<form id="password-login-form"><label class="field"><span class="field-label">邮箱地址 <small>任一已绑定的邮箱都可以</small></span><input name="email" type="email" autocomplete="username" value="${esc(email)}" placeholder="you@example.com" required></label>
+ <label class="field"><span class="field-label">密码</span><input name="password" type="password" autocomplete="current-password" maxlength="128" placeholder="账号密码" required></label>
+ <button type="button" class="text-link" data-action="login-mode" data-id="code">忘记密码或没设置过？用邮箱验证码登录 ↗</button>
+ <div id="form-error" class="inline-error" role="alert"></div><button class="primary full-width" type="submit">登录 ${icon('arrow')}</button><p class="auth-note">密码是可选的：只有在「账号与安全」里设置过密码的账号才能用密码登录。<br>连续输错 5 次会锁定 15 分钟，期间仍可用邮箱验证码登录。</p></form>`;
+ modal(loginMode==='code'?'用邮箱，开启你的旅程':'欢迎回来，旅行者。',`<div class="signin-art">${icon('mail')}<div><h3>A letter starts here.</h3><p>${loginMode==='code'?'新邮箱自动注册，已有邮箱登录原账号。':'用设置过的密码直接登录。'}</p></div></div>${tabs}${loginMode==='code'?codeForm:passwordForm}`,false,'login');
+ const focus=loginNeedName?'#login-form input[name="name"]':loginMode==='password'&&email?'#password-login-form input[name="password"]':null;
+ if(focus)setTimeout(()=>$(focus)?.focus({preventScroll:true}),90);
+}
+async function finishLogin(){
+ const next=afterLogin;afterLogin=null;loginNeedName=false;closeModal(true);syncIdentity();render();
+ toast('已登录，正在加载你的服务器记录');
+ if(next)await next();
+}
+// ---- 账号与安全 ----
+// 敏感操作（绑定/解绑邮箱、换主邮箱、改密码、下线设备）需要近期验证过身份：
+// 先看服务器给的 verifiedUntil，过期就弹二次验证；服务器仍返回 REAUTH_REQUIRED 时同样兜底。
+async function withFresh(fn,back=accountModal){
+ const ask=()=>{pendingReauth=fn;reauthBack=back;reauthModal();};
+ if(!fresh())return ask();
+ try{return await fn();}catch(e){if(e.code==='REAUTH_REQUIRED')return ask();throw e;}
+}
+function refreshAccount(){render();accountModal();}
+function accountModal(){
+ const a=PP.account;if(!a)return loginModal();
+ const full=a.emails.length>=a.maxEmails;
+ const emails=a.emails.map(e=>`<li class="account-item"><div><strong>${esc(e.email)}</strong><small>${e.primary?'<span class="status">主邮箱</span>':''}验证于 ${date(e.verifiedAt)}</small></div><div class="item-actions">${e.primary?'<small>安全验证码发到这里</small>':`<button class="text-link" data-action="email-primary" data-id="${esc(e.email)}">设为主邮箱</button><button class="text-link danger-link" data-action="email-remove" data-id="${esc(e.email)}">解绑</button>`}</div></li>`).join('');
+ const bind=full?`<div class="notice">${icon('info')}<span>已绑定 ${a.maxEmails} 个邮箱，达到上限。解绑一个后才能绑定新的。</span></div>`
+  :!bindDraft?.sent?`<form id="bind-form"><label class="field"><span class="field-label">绑定新邮箱 <small>绑定后可用它登录、签收寄给它的信</small></span><div class="code-row"><input name="email" type="email" autocomplete="email" placeholder="another@example.com" value="${esc(bindDraft?.email||'')}" required><button type="submit" class="secondary">发送验证码</button></div></label></form>`
+  :`<form id="bind-form" data-stage="verify"><label class="field"><span class="field-label">验证码已发送到 ${esc(bindDraft.email)}</span><div class="code-row"><input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="6 位验证码" value="${esc(bindDraft.code||'')}" required><button type="button" class="secondary" data-action="bind-resend" data-cooldown="bind:${esc(bindDraft.email)}">重新发送</button></div></label><p class="field-hint" role="status">${esc(bindDraft.note)}</p><div class="modal-actions compact"><button type="button" class="secondary" data-action="bind-cancel">换一个邮箱</button><button type="submit" class="primary">确认绑定 ${icon('check')}</button></div></form>`;
+ const security=fresh()?`<span class="status">已验证身份 · ${dateTime(a.verifiedUntil)} 前无需重复</span>`:`<button class="text-link" data-action="reauth-now">敏感操作前需验证身份 · 现在验证 ↗</button>`;
+ modal('账号与安全',`<div id="form-error" class="inline-error" role="alert"></div>
+ <section class="account-section"><div class="account-head"><span class="avatar">${esc(Array.from(a.name)[0])}</span><div><h3>${esc(a.name)}</h3><p>注册于 ${date(a.createdAt)}</p></div><div class="account-security">${security}</div></div>
+ <form id="profile-form"><label class="field"><span class="field-label">昵称 <small>寄信署名与市集展示用，1–50 字</small></span><div class="code-row"><input name="name" maxlength="50" autocomplete="nickname" value="${esc(a.name)}" required><button type="submit" class="secondary">保存</button></div></label></form></section>
+ <section class="account-section"><div class="section-row"><h3>登录邮箱</h3><span class="tab-count">${a.emails.length} / ${a.maxEmails}</span></div><p class="field-hint">任一已绑定邮箱都能登录这个账号，也能签收寄给它的信。一个邮箱只能属于一个账号。</p><ul class="account-list">${emails}</ul>${bind}</section>
+ <section class="account-section"><div class="section-row"><h3>登录密码</h3><span class="status ${a.hasPassword?'':'pending'}">${a.hasPassword?'已设置':'未设置'}</span></div><p class="field-hint">${a.hasPassword?`上次修改：${dateTime(a.passwordChangedAt)}。邮箱验证码登录依然可用。`:'目前只能用邮箱验证码登录。设置密码后，也可以用「邮箱 + 密码」直接登录。'}</p><div class="modal-actions compact"><button class="secondary" data-action="password-set">${a.hasPassword?'修改密码':'设置密码'}</button>${a.hasPassword?'<button class="secondary" data-action="password-remove">移除密码</button>':''}</div></section>
+ <section class="account-section"><div class="section-row"><h3>登录设备</h3></div><p class="field-hint">查看哪些浏览器正登录着这个账号；不认识的设备可以单独下线。</p><div class="modal-actions compact"><button class="secondary" data-action="sessions">管理登录设备 ${icon('chevron')}</button></div></section>
+ <div class="modal-actions"><button class="secondary" data-action="settings">返回设置</button><button class="secondary" data-action="logout">${icon('logout')} 退出当前设备</button></div>`,false,'account');
+}
+function reauthModal(){
+ const a=PP.account;if(!a)return loginModal();
+ if(!a.hasPassword)reauthMode='code';
+ const tabs=a.hasPassword?`<div class="tabs auth-tabs" role="tablist">${[['code','邮箱验证码'],['password','账号密码']].map(([id,label])=>`<button type="button" class="tab ${reauthMode===id?'active':''}" role="tab" aria-selected="${reauthMode===id}" data-action="reauth-mode" data-id="${id}">${label}</button>`).join('')}</div>`:'';
+ const body=reauthMode==='code'
+  ?`<label class="field"><span class="field-label">验证码发送到主邮箱 <small>${esc(a.email)}</small></span><div class="code-row"><input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="6 位验证码" required><button type="button" class="secondary" data-action="reauth-code" data-cooldown="reauth">获取验证码</button></div></label><p id="reauth-note" class="field-hint" role="status">验证码 10 分钟内有效，不要转发给任何人。</p>`
+  :`<label class="field"><span class="field-label">账号密码</span><input name="password" type="password" autocomplete="current-password" maxlength="128" required></label><p class="field-hint">连续输错 5 次会锁定 15 分钟，届时可改用邮箱验证码。</p>`;
+ modal('先确认一下，是你本人。',`<p class="modal-intro">绑定或解绑邮箱、更换主邮箱、修改密码、下线设备之前，需要先验证身份。验证通过后 ${PP.config.auth?.reauthMinutes||15} 分钟内无需重复。</p>${tabs}<form id="reauth-form">${body}<div id="form-error" class="inline-error" role="alert"></div><div class="modal-actions"><button type="button" class="secondary" data-action="reauth-cancel">返回</button><button type="submit" class="primary">验证身份 ${icon('shield')}</button></div></form>`,false,'reauth');
+}
+function confirmModal(title,text,label,fn,back=accountModal){
+ pendingConfirm={fn,back};
+ modal(title,`<div class="notice warm">${icon('info')}<span>${text}</span></div><div id="form-error" class="inline-error" role="alert"></div><div class="modal-actions"><button class="secondary" data-action="confirm-no">再想想</button><button class="danger-btn" data-action="confirm-yes">${label}</button></div>`,false,'confirm');
+}
+function passwordModal(){
+ const a=PP.account,needCurrent=a.hasPassword&&!fresh();
+ modal(a.hasPassword?'修改登录密码':'设置一个登录密码',`<p class="modal-intro">${a.hasPassword?'保存后，其他已登录的设备会全部下线，当前设备保持登录。':'密码是可选的：设置后可以用「邮箱 + 密码」直接登录，邮箱验证码登录依然可用。保存后其他已登录设备会下线。'}</p><form id="password-form">${needCurrent?`<label class="field"><span class="field-label">当前密码</span><input name="currentPassword" type="password" autocomplete="current-password" maxlength="128" required></label><button type="button" class="text-link" data-action="password-forgot">忘记当前密码？改用邮箱验证码验证 ↗</button>`:''}<label class="field"><span class="field-label">新密码 <small>8–128 位，需同时包含字母和数字</small></span><input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label><label class="field"><span class="field-label">再输入一次</span><input name="confirm" type="password" autocomplete="new-password" minlength="8" maxlength="128" required></label><div id="form-error" class="inline-error" role="alert"></div><div class="modal-actions"><button type="button" class="secondary" data-action="account-back">返回</button><button type="submit" class="primary">${a.hasPassword?'保存新密码':'设置密码'} ${icon('lock')}</button></div></form>`,false,'password');
+}
+async function sessionsModal(list){
+ if(!list)list=await PP.sessions();
+ modal('登录过的设备',`<p class="modal-intro">这里列出仍在有效期内的登录。看到不认识的设备，先下线它，再修改密码。</p><ul class="account-list">${list.map(s=>`<li class="account-item"><div><strong>${esc(s.device)}${s.current?' <span class="status">当前设备</span>':''}</strong><small>最近活动 ${dateTime(s.lastSeenAt)} · 登录于 ${dateTime(s.createdAt)}</small></div><div class="item-actions">${s.current?'<small>请用「退出当前设备」</small>':`<button class="text-link danger-link" data-action="session-revoke" data-id="${esc(s.id)}">下线</button>`}</div></li>`).join('')}</ul><div id="form-error" class="inline-error" role="alert"></div><div class="modal-actions"><button class="secondary" data-action="account-back">返回账号与安全</button>${list.length>1?'<button class="danger-btn" data-action="session-revoke-others">下线其他所有设备</button>':''}</div><p class="auth-note">设备名称按浏览器标识粗略识别，仅供参考；不记录精确位置。</p>`,false,'sessions');
+}
+async function sendBindCode(email){
+ return withFresh(async()=>{
+  const r=await PP.bindRequest(email);const normalized=email.trim().toLowerCase();
+  bindDraft={email:normalized,sent:true,code:development()&&r.devCode?r.devCode:'',note:development()&&r.devCode?'开发沙盒：已填入服务器随机验证码，没有发送邮件，不能证明真实邮箱所有权。':`验证码邮件已交给邮件服务，请到 ${r.sentTo||normalized} 查收（含垃圾邮件箱）。`};
+  startCooldown('bind:'+normalized);accountModal();
+ });
 }
 function locationModal(){
  modal('你在哪里，故事就从哪里开始。',`<p class="modal-intro">${development()?'开发沙盒的城市可手动切换，不代表真实位置。':'当地作品依据服务器识别的 IP 城市开放，不能手动切城；IP 城市可能存在误差，不代表精确地址。'}</p><div class="notice">${icon('pin')}<span>当前：${city(PP.state.location).name}${development()?' · 沙盒城市':''}。定位未确认时暂停当地领取、购买和寄信，市集仍可浏览。</span></div>${development()?`<div class="city-options">${Object.entries(PP.cities).map(([id,c])=>`<button class="city-choice ${PP.state.location===id?'active':''}" data-action="set-location" data-id="${id}"><img src="${PP.product(id+'-free').img}" alt="${c.name}"><span><strong>${c.name}</strong><small>${c.en}</small></span>${PP.state.location===id?icon('check'):''}</button>`).join('')}</div>`:'<p class="layout-note">关闭此窗口后，可用顶部刷新按钮重新获取服务器状态。已拥有的收藏不会因定位失败而丢失。</p>'}`,false,'location');
@@ -212,7 +296,7 @@ function composeModal(){
 }
 function confirmSend(){
  const a=PP.ownAssets().find(a=>a.id===compose.assetId),p=PP.product(a.productId),s=PP.ownAssets().find(a=>a.id===compose.stampAssetId);if(!s)throw new Error('请先选择一枚未使用的邮票。');const est=PP.deliveryEstimate(compose.toCity);
- if(compose.toEmail.trim().toLowerCase()===PP.state.user.email.toLowerCase())throw new Error('请填写朋友的邮箱，不能寄给自己。');
+ if(ownsEmail(compose.toEmail))throw new Error('这是你账号绑定的邮箱，请填写朋友的邮箱，不能寄给自己。');
  storage.set('posterposta-draft',compose);
  modal('确认后，就让想念慢慢出发。',`<div class="steps"><span class="step"><b>✓</b> 写寄语</span><span class="step-line"></span><span class="step active"><b>2</b> 确认寄送</span><span class="step-line"></span><span class="step"><b>3</b> 等待抵达</span></div><div class="letter-message">${stamp(PP.product(s.productId))}${esc(compose.message)}<div class="letter-sign">${esc(PP.state.user.name)} · 寄自${city(PP.state.location).name}</div></div><div class="cost-row"><span>收信人</span><strong>${esc(compose.toName)}</strong></div><div class="cost-row"><span>收信邮箱</span><strong style="overflow-wrap:anywhere;text-align:right">${esc(compose.toEmail)}</strong></div><div class="cost-row"><span>旅行时间</span><span>${est.min}–${est.max} 个工作日 · ${city(compose.toCity).name}</span></div><div class="cost-row"><span>消耗资产</span><span>1 张明信片 + 1 枚邮票</span></div><div class="notice warm">${icon('info')}<span>请确认邮箱无误。提交后会锁定明信片、消耗邮票，并在服务器保存信件和延迟队列。${development()?'<strong>开发沙盒不发送邮件。</strong>可用收信链接切换账号验证签收。':'<strong>这是对外发送，不可撤销。</strong>队列到期将尝试向此邮箱发送领取邀请，无法保证真实送达；不能撤回或重复使用资产。'}</span></div><div id="form-error" class="inline-error" role="alert"></div><div class="modal-actions"><button class="secondary" data-action="resume-compose">再改一改</button><button class="primary" data-action="send-letter">${development()?'确认沙盒寄信':'确认对外发送 · 不可撤销'} ${icon('plane')}</button></div>`,false,'confirm-send');
 }
@@ -236,8 +320,8 @@ function claimPage(){
  let content;
  if(s.loading)content='<p role="status">正在核对收信邀请…</p>';
  else if(signed)content=`<h2>这封信已经签收</h2><p>不会重复领取或再次移动资产。</p>${s.id?`<button class="primary" data-action="claimed-letter" data-id="${esc(s.id)}">打开已签收信件 ${icon('arrow')}</button>`:''}`;
- else if(s.error)content=`<h2>${s.code==='CLAIM_EMAIL_MISMATCH'?'请切换到正确的收信邮箱':s.code==='LETTER_NOT_READY'?'信件还未进入可签收状态':'暂时无法打开这封邀请'}</h2><p role="alert">${esc(s.error)}</p>${s.code==='LETTER_NOT_READY'?`<p>${development()?'请让发送者模拟投递，或等待沙盒队列到期，再刷新。':'请稍后刷新；排队待发送的信件还不能签收。'}</p>`:''}<div class="modal-actions">${u?'<button class="secondary" data-action="claim-switch">退出并更换邮箱</button>':''}<button class="primary" data-action="refresh-claim">重新核对</button></div>`;
- else content=`<h2>${esc(s.fromName)} 给你寄来一份风景</h2><p>${u?`已登录：${esc(u.email)}`:`收信邮箱：${esc(s.maskedEmail)}`}</p><p>${u?'确认签收后，明信片转入你的收藏，并开启双方对话。':'请用这封邀请对应的收信邮箱注册或登录。验证前不会展示寄语全文，也不会领取资产。'}</p><div class="modal-actions">${u?'<button class="secondary" data-action="claim-switch">更换邮箱</button><button class="primary" data-action="claim-letter">确认签收</button>':'<button class="primary" data-action="claim-login">用收信邮箱注册 / 登录</button>'}</div>`;
+ else if(s.error)content=`<h2>${s.code==='CLAIM_EMAIL_MISMATCH'?'请切换到正确的收信邮箱':s.code==='LETTER_NOT_READY'?'信件还未进入可签收状态':'暂时无法打开这封邀请'}</h2><p role="alert">${esc(s.error)}</p>${s.code==='CLAIM_EMAIL_MISMATCH'&&u?`<p>如果寄件人写的是你的另一个邮箱，可以把它绑定到当前账号，绑定成功后会自动重新核对。</p>`:''}${s.code==='LETTER_NOT_READY'?`<p>${development()?'请让发送者模拟投递，或等待沙盒队列到期，再刷新。':'请稍后刷新；排队待发送的信件还不能签收。'}</p>`:''}<div class="modal-actions">${u?'<button class="secondary" data-action="claim-switch">退出并更换邮箱</button>':''}${s.code==='CLAIM_EMAIL_MISMATCH'&&u?'<button class="secondary" data-action="account-center">绑定收信邮箱</button>':''}<button class="primary" data-action="refresh-claim">重新核对</button></div>`;
+ else content=`<h2>${esc(s.fromName)} 给你寄来一份风景</h2><p>${u?`已登录：${esc(u.email)}${PP.account?.emails.length>1?` 等 ${PP.account.emails.length} 个已绑定邮箱`:''}`:`收信邮箱：${esc(s.maskedEmail)}`}</p><p>${u?'确认签收后，明信片转入你的收藏，并开启双方对话。':'请用这封邀请对应的收信邮箱注册或登录。验证前不会展示寄语全文，也不会领取资产。'}</p><div class="modal-actions">${u?'<button class="secondary" data-action="claim-switch">更换邮箱</button><button class="primary" data-action="claim-letter">确认签收</button>':'<button class="primary" data-action="claim-login">用收信邮箱注册 / 登录</button>'}</div>`;
  return heading('A LETTER FOR YOU','有一份风景，正在等你。','签收凭据仅留在当前页面内存，已从地址栏移除，不写入浏览器存储。')+`<section class="claim-page"><div class="success-icon">${icon('mail')}</div>${content}<div id="form-error" class="inline-error" role="alert"></div><p class="auth-note">刷新整个页面后，请从原始邮件或保存的沙盒链接重新进入。${development()?'当前为开发沙盒，不发送邮件。':''}</p></section>`;
 }
 async function refreshState(){
@@ -280,8 +364,8 @@ const rules=()=>[
  ['你的数据保存在何处','账号、收藏、信件、聊天、作品与订单保存在服务器 SQLite 数据库。只有草稿、喜欢和本地举报按账号隔离存于本浏览器；清除浏览器数据不会删除服务器记录，但会丢失这些本地内容。']
 ];
 function rulesModal(){modal('邮局公约 · 小事也要认真',`<div class="rules-list">${rules().map(([t,p])=>`<section class="rule-item"><h3>${t}</h3><p>${p}</p></section>`).join('')}</div><button class="primary full-width" data-action="close">知道了，继续旅程 ${icon('check')}</button>`,false,'rules');}
-function demoModal(){modal(development()?'开发沙盒 · 真实数据库，非真实交易':'服务说明 · 当前开放边界',`<p class="modal-intro">${development()?'服务器生成随机测试验证码；切城、模拟投递、审核和购买仅用于开发验证，不发送邮件、不扣款。':'邮箱验证码和收信邀请通过邮件服务发送。位置由服务器识别；付费购买未开通，对外寄信提交后不可撤销。'}</p><div class="rules-list"><section class="rule-item"><h3>已连接服务器</h3><p>邮箱登录、收藏与资产管理、寄信队列、正确邮箱签收、双向聊天、上架与咨询、作品上传、订单记录均使用后端接口与 SQLite 数据库。不在刷新后植入示例资产。</p></section><section class="rule-item"><h3>尚未完成</h3><p>真实支付与退款提现、送达与退信 webhook、生产管理员审核、举报工单与屏蔽拒收、素材商用授权核验。邮件接受发送不是实际送达，开发审核不代表内容或版权审核。</p></section><section class="rule-item"><h3>数据与隐私</h3><p>账号、信件、聊天和上传图片会发送到服务器保存。草稿、喜欢和本地举报只留在当前账号的浏览器空间。收信凭据只在页面内存中保留，不写入 localStorage。</p></section></div><div class="modal-actions">${development()?'<button class="secondary" data-action="location">切换沙盒城市</button>':''}<button class="primary" data-action="close">继续逛逛 ${icon('arrow')}</button></div>`,false,'demo');}
-function settingsModal(){modal('照顾好你的私人邮局。',`<div class="settings-menu"><button data-action="${PP.state.user?'account-info':'login'}">${icon('mail')}<span>邮箱账号</span><span>${PP.state.user?esc(PP.state.user.email):'未登录'} ›</span></button><button data-action="transactions">${icon('wallet')}<span>订单与记录</span><span>›</span></button><button data-action="rules">${icon('shield')}<span>隐私、资产与邮局公约</span><span>›</span></button><button data-action="demo">${icon('info')}<span>服务说明 / 上线边界</span><span>›</span></button>${PP.state.user?`<button data-action="logout">${icon('logout')}<span>退出账号 / 更换邮箱</span><span>保留服务器记录 ›</span></button>`:''}</div><p class="auth-note">服务器禁用破坏性重置，不提供一键清空账号或资产。</p>`,false,'settings');}
+function demoModal(){modal(development()?'开发沙盒 · 真实数据库，非真实交易':'服务说明 · 当前开放边界',`<p class="modal-intro">${development()?'服务器生成随机测试验证码；切城、模拟投递、审核和购买仅用于开发验证，不发送邮件、不扣款。':'邮箱验证码和收信邀请通过邮件服务发送。位置由服务器识别；付费购买未开通，对外寄信提交后不可撤销。'}</p><div class="rules-list"><section class="rule-item"><h3>已连接服务器</h3><p>邮箱验证码 / 可选密码登录、多邮箱绑定、登录设备管理、收藏与资产管理、寄信队列、正确邮箱签收、双向聊天、上架与咨询、作品上传、订单记录均使用后端接口与 SQLite 数据库。不在刷新后植入示例资产。</p></section><section class="rule-item"><h3>尚未完成</h3><p>真实支付与退款提现、送达与退信 webhook、生产管理员审核、举报工单与屏蔽拒收、素材商用授权核验。邮件接受发送不是实际送达，开发审核不代表内容或版权审核。</p></section><section class="rule-item"><h3>数据与隐私</h3><p>账号、信件、聊天和上传图片会发送到服务器保存。草稿、喜欢和本地举报只留在当前账号的浏览器空间。收信凭据只在页面内存中保留，不写入 localStorage。</p></section></div><div class="modal-actions">${development()?'<button class="secondary" data-action="location">切换沙盒城市</button>':''}<button class="primary" data-action="close">继续逛逛 ${icon('arrow')}</button></div>`,false,'demo');}
+function settingsModal(){modal('照顾好你的私人邮局。',`<div class="settings-menu"><button data-action="${PP.state.user?'account-center':'login'}">${icon('lock')}<span>账号与安全</span><span>${PP.account?`${esc(PP.account.email)}${PP.account.emails.length>1?` 等 ${PP.account.emails.length} 个邮箱`:''} · ${PP.account.hasPassword?'已设密码':'验证码登录'}`:'未登录'} ›</span></button><button data-action="transactions">${icon('wallet')}<span>订单与记录</span><span>›</span></button><button data-action="rules">${icon('shield')}<span>隐私、资产与邮局公约</span><span>›</span></button><button data-action="demo">${icon('info')}<span>服务说明 / 上线边界</span><span>›</span></button>${PP.state.user?`<button data-action="logout">${icon('logout')}<span>退出账号 / 更换邮箱</span><span>保留服务器记录 ›</span></button>`:''}</div><p class="auth-note">服务器禁用破坏性重置，不提供一键清空账号或资产。</p>`,false,'settings');}
 function transactionsModal(){const ts=PP.state.transactions.slice().reverse();modal('每一份风景，都有一张收据。',`<p class="modal-intro">领取与订单记录保存在服务器。${development()?'沙盒标价不代表实际付款或收入。':'真实支付未开通，不会生成已付款凭据。'}真实收入为 0，不提供提现。</p>${ts.length?ts.map(t=>`<div class="transaction"><div><h3>${esc(PP.product(t.productId).title)}</h3><p>${esc(t.description)} · ${date(t.createdAt)}</p></div><strong>${t.amount<0?'−':''}¥${fmt(Math.abs(t.amount))}</strong></div>`).join(''):empty('还没有收据','领取第一份风景，开启你的旅程。')}<div class="notice">${icon('wallet')}<span>真实支付与提现尚未接入，当前可结算收入为 ¥${fmt(PP.state.revenue)}。这里不会模拟提现成功。</span></div>`,false,'transactions');}
 function reportModal(id){modal('每一份来往，都应当被尊重。',`<form id="report-form" data-id="${esc(id)}"><label class="field"><span class="field-label">遇到什么问题？</span><select name="reason"><option>骚扰或不友善内容</option><option>涉嫌侵权</option><option>交易纠纷</option><option>隐私泄露</option><option>不再接收此类内容</option></select></label><label class="field"><span class="field-label">补充说明（选填）</span><textarea name="message" maxlength="500" placeholder="请勿在此填写身份证、银行卡等敏感信息。"></textarea></label><div class="notice">${icon('shield')}<span>反馈仅按当前账号保存在本浏览器，不提交客服，也不会屏蔽对方。举报工单、处理通知、屏蔽与拒收功能尚未接入。</span></div><div id="form-error" class="inline-error" role="alert"></div><button class="primary full-width" type="submit">保存本地反馈</button></form>`,false,'report');}
 
@@ -326,8 +410,40 @@ async function action(el){
   if(development()&&result.devCode&&result.emailSent===false){f.elements.code.value=result.devCode;$('#otp-note').textContent='已填入服务器随机开发验证码；未发送邮件，不代表已验证真实邮箱所有权。';}
   else if(result.emailSent){$('#otp-note').textContent='验证码邮件已交给邮件服务，请查收（含垃圾邮件箱）；服务接受不保证送达。';}
   else throw new Error('服务器未确认验证码发送，请稍后重试。');
+  startCooldown('login');
   return;
  }
+ if(a==='login-mode'){
+  const email=$('#modal-root form input[name="email"]')?.value.trim()||'';
+  loginMode=id;loginNeedName=false;return loginModal({email});
+ }
+ if(a==='account-center'||a==='account-info'){if(!PP.state.user)return loginModal();bindDraft=null;return accountModal();}
+ if(a==='account-back')return accountModal();
+ if(a==='reauth-now')return withFresh(async()=>{refreshAccount();toast('身份已验证');});
+ if(a==='reauth-mode'){reauthMode=id;return reauthModal();}
+ if(a==='reauth-cancel'){const back=reauthBack||accountModal;pendingReauth=null;reauthBack=null;return back();}
+ if(a==='reauth-code'){
+  const r=await PP.reauthRequest();startCooldown('reauth');
+  const f=$('#reauth-form'),note=$('#reauth-note');
+  if(development()&&r.devCode){if(f?.elements.code)f.elements.code.value=r.devCode;if(note)note.textContent='开发沙盒：已填入服务器随机验证码，没有发送邮件。';}
+  else if(note)note.textContent=`验证码已发送到 ${r.sentTo}，请查收（含垃圾邮件箱）。`;
+  return;
+ }
+ if(a==='confirm-no'){const back=pendingConfirm?.back||accountModal;pendingConfirm=null;return back();}
+ if(a==='confirm-yes'){
+  const p=pendingConfirm;pendingConfirm=null;if(!p)return accountModal();
+  try{return await withFresh(p.fn,p.back);}catch(e){await p.back();throw e;}
+ }
+ if(a==='email-primary')return withFresh(async()=>{await PP.setPrimaryEmail(id);refreshAccount();toast(`主邮箱已改为 ${id}`);});
+ if(a==='email-remove')return confirmModal('解绑这个邮箱？',`解绑后不能再用 <strong>${esc(id)}</strong> 登录这个账号；寄给它、还没签收的信，也要重新绑定后才能签收。已签收的信件和收藏不受影响。`,'确认解绑',async()=>{await PP.removeEmail(id);refreshAccount();toast(`已解绑 ${id}`);});
+ if(a==='bind-resend')return sendBindCode(bindDraft.email);
+ if(a==='bind-cancel'){bindDraft=null;return accountModal();}
+ if(a==='password-set')return PP.account.hasPassword?passwordModal():withFresh(async()=>passwordModal());
+ if(a==='password-forgot')return withFresh(async()=>passwordModal(),passwordModal);
+ if(a==='password-remove')return confirmModal('移除登录密码？','移除后只能用邮箱验证码登录。已登录的设备不受影响。','移除密码',async()=>{await PP.removePassword();refreshAccount();toast('密码已移除，今后用邮箱验证码登录');});
+ if(a==='sessions')return sessionsModal();
+ if(a==='session-revoke')return withFresh(async()=>{const r=await PP.revokeSession(id);await sessionsModal(r.sessions);toast('该设备已下线');},()=>sessionsModal());
+ if(a==='session-revoke-others')return confirmModal('下线其他所有设备？','除了你现在用的这台，其他登录着这个账号的浏览器都会立即退出，需要重新登录。','全部下线',async()=>{const r=await PP.revokeOtherSessions();await sessionsModal(r.sessions);toast(`已下线 ${r.revoked} 台其他设备`);},()=>sessionsModal());
  if(a==='detail')return detail(id,m);
  if(a==='claim')return requireLogin(async()=>{const asset=await PP.acquire(id);acquired(asset);});
  if(a==='checkout')return checkout(id,m);
@@ -358,7 +474,6 @@ async function action(el){
  if(a==='demo')return demoModal();
  if(a==='settings')return settingsModal();
  if(a==='transactions')return transactionsModal();
- if(a==='account-info')return modal('你的邮箱账号',`<div class="notice">${icon('mail')}<span>${esc(PP.state.user.name)}<br>${esc(PP.state.user.email)}<br>${development()?'开发沙盒账号 · 测试验证码不证明真实邮箱所有权':'已通过邮箱验证码登录'}</span></div><p class="modal-intro">退出后可使用其他邮箱注册或登录。服务器按账号保存收藏与信件；草稿、喜欢、本地举报按 user.id 隔离，不会在切号后混用。</p><button class="secondary full-width" data-action="settings">返回设置</button>`);
  if(a==='logout'){await PP.logout();closeModal(true);syncIdentity();if(view==='claim')await loadClaim();else render();return toast('已退出，收藏与信件保留在服务器，可使用其他邮箱登录');}
  if(a==='report')return await requireLogin(async()=>reportModal(id));
 }
@@ -376,10 +491,39 @@ document.addEventListener('submit',async e=>{
   const alert=f.querySelector('.inline-error');if(alert){alert.textContent='';alert.classList.remove('show');}
   if(f.id==='login-form'){
    if(!data.has('consent'))throw new Error('请先阅读并确认数据与服务说明');
-   await PP.register(d.email,d.name,d.code);
-   const next=afterLogin;afterLogin=null;closeModal(true);syncIdentity();render();
-   toast('已登录，正在加载你的服务器记录');
-   if(next)await next();
+   try{await PP.register(d.email,loginNeedName?d.name:undefined,d.code);}
+   catch(e){
+    // 新邮箱：验证码没被消耗，补填昵称后用同一个验证码完成注册。
+    if(e.code==='NAME_REQUIRED'&&!loginNeedName){loginNeedName=true;return loginModal({email:d.email,code:d.code,consent:true,note:'验证码正确。补一个昵称，就能完成注册。'});}
+    throw e;
+   }
+   await finishLogin();
+  }
+  else if(f.id==='password-login-form'){await PP.passwordLogin(d.email,d.password);await finishLogin();}
+  else if(f.id==='reauth-form'){
+   await PP.reauthVerify(reauthMode==='code'?{code:d.code}:{password:d.password});
+   const next=pendingReauth,back=reauthBack||accountModal;pendingReauth=null;reauthBack=null;
+   toast(`身份已验证，${PP.config.auth?.reauthMinutes||15} 分钟内无需重复`);
+   if(!next)return back();
+   try{await next();}catch(e){await back();throw e;}
+  }
+  else if(f.id==='profile-form'){await PP.updateProfile(d.name);refreshAccount();toast('昵称已更新');}
+  else if(f.id==='bind-form'){
+   if(f.dataset.stage!=='verify')return await sendBindCode(d.email);
+   const email=bindDraft.email;
+   await withFresh(async()=>{
+    await PP.bindVerify(email,d.code);bindDraft=null;
+    if(view==='claim'){closeModal(true);await loadClaim();return toast(`已绑定 ${email}，已重新核对这封来信`);}
+    refreshAccount();toast(`已绑定 ${email}，可以用它登录了`);
+   });
+  }
+  else if(f.id==='password-form'){
+   if(d.password!==d.confirm)throw new Error('两次输入的新密码不一致。');
+   if(!/[A-Za-z]/.test(d.password)||!/\d/.test(d.password))throw new Error('密码须为 8–128 个字符，且同时包含字母和数字。');
+   const had=PP.account.hasPassword;
+   const save=async(current)=>{const r=await PP.setPassword(d.password,current);refreshAccount();toast(r.revokedSessions?`密码已${had?'更新':'设置'}，其他 ${r.revokedSessions} 台设备已下线`:had?'密码已更新':'密码已设置，下次可以用邮箱 + 密码登录');};
+   if(d.currentPassword!==undefined)await save(d.currentPassword);
+   else await withFresh(()=>save(),passwordModal);
   }
   else if(f.id==='purchase-form'){
    if(!development()||activeModal?.kind!=='checkout'||!data.has('sandboxConsent'))throw new Error('请在开发沙盒确认页明确同意后再测试购买。');
@@ -407,7 +551,7 @@ document.addEventListener('submit',async e=>{
 let searchTimer;
 document.addEventListener('input',e=>{
  if(e.target.id==='market-search'){marketSearch=e.target.value;clearTimeout(searchTimer);searchTimer=setTimeout(()=>{const start=e.target.selectionStart;render();const inp=$('#market-search');inp?.focus();inp?.setSelectionRange(start,start);},300);}
- if(e.target.matches('#login-form input[name="email"]')){$('#login-form').elements.code.value='';$('#otp-note').textContent='邮箱已更改，请为这个邮箱重新获取验证码。';}
+ if(e.target.matches('#login-form input[name="email"]')){$('#login-form').elements.code.value='';$('#otp-note').textContent='邮箱已更改，请为这个邮箱重新获取验证码。';delete cooldowns.login;tickCooldowns();}
  if(e.target.closest('#compose-form')){captureCompose();if($('#live-message'))$('#live-message').textContent=compose.message||'把今天遇见的风景，写给你。';if($('#live-to'))$('#live-to').textContent='TO '+(compose.toName||'那个想起的人');$('#word-count').textContent=compose.message.length+' / 500';storage.set('posterposta-draft',compose);}
 });
 document.addEventListener('change',async e=>{try{

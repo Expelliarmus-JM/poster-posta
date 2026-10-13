@@ -13,7 +13,16 @@ const MAX_BODY = 3 * 1024 * 1024;
 const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 const OTP_MS = 10 * 60 * 1000;
 const COOKIE = 'pp_session';
+// 敏感账号操作（绑定/解绑邮箱、改主邮箱、设密码、踢下线）要求本会话在这段时间内完成过身份验证。
+const REAUTH_MS = 15 * 60 * 1000;
+const MAX_EMAILS = 5;
+// 密码登录：15 分钟内连续 5 次失败锁定 15 分钟（按邮箱；生产再加出口 IP）。
+const MAX_FAILURES = 5;
+const FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const LOCK_MS = 15 * 60 * 1000;
+const SCRYPT = { N: 16384, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
 const sha256 = value => crypto.createHash('sha256').update(value).digest();
+const hex = value => sha256(value).toString('hex');
 const id = prefix => `${prefix}-${crypto.randomUUID()}`;
 const randomToken = () => crypto.randomBytes(32).toString('base64url');
 
@@ -151,6 +160,37 @@ async function sendResend({ apiKey, from, to, subject, text: body, idempotencyKe
   const data = await response.json();
   if (typeof data.id !== 'string' || data.id.length < 1 || data.id.length > 256) throw new Error('邮件服务响应无效');
   return { id: data.id };
+}
+function passwordText(value) {
+  const message = '密码须为 8–128 个字符，且同时包含字母和数字。';
+  if (typeof value !== 'string') fail(400, 'INVALID_PASSWORD', message);
+  const size = Array.from(value).length;
+  if (size < 8 || size > 128 || !/[A-Za-z]/.test(value) || !/\d/.test(value) || /[\u0000-\u001f\u007f]/.test(value)) fail(400, 'INVALID_PASSWORD', message);
+  return value;
+}
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password.normalize('NFKC'), salt, 64, SCRYPT);
+  return ['scrypt', SCRYPT.N, SCRYPT.r, SCRYPT.p, salt.toString('base64'), hash.toString('base64')].join('$');
+}
+const DUMMY_PASSWORD_HASH = hashPassword('not-a-real-password-0');
+// 无论账号是否存在、是否设过密码，都完整跑一次 scrypt，避免用响应时间探测账号。
+function checkPassword(password, stored) {
+  const parts = typeof stored === 'string' ? stored.split('$') : [];
+  const real = parts.length === 6 && parts[0] === 'scrypt';
+  const [, N, r, p, salt, hash] = real ? parts : DUMMY_PASSWORD_HASH.split('$');
+  const expected = Buffer.from(hash, 'base64');
+  const supplied = typeof password === 'string' && password.length <= 512 ? password.normalize('NFKC') : '';
+  const actual = crypto.scryptSync(supplied, Buffer.from(salt, 'base64'), expected.length, { N: Number(N), r: Number(r), p: Number(p), maxmem: SCRYPT.maxmem });
+  return crypto.timingSafeEqual(actual, expected) && real;
+}
+function deviceLabel(ua) {
+  if (typeof ua !== 'string' || !ua) return '未知设备';
+  const os = /iPhone|iPad|iPod/.test(ua) ? 'iOS' : /Android/.test(ua) ? 'Android' : /Mac OS X|Macintosh/.test(ua) ? 'macOS'
+    : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : '';
+  const browser = /MicroMessenger/.test(ua) ? '微信' : /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox'
+    : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /node|curl|undici/i.test(ua) ? '脚本客户端' : '';
+  return [browser, os].filter(Boolean).join(' · ') || '未知设备';
 }
 function publicUser(row) { return row ? { id: row.id, email: row.email, name: row.name } : null; }
 function maskEmail(email) {
@@ -303,7 +343,33 @@ function createApp(options = {}) {
     ) STRICT;
     CREATE INDEX IF NOT EXISTS letter_messages ON messages(letter_id);
     CREATE INDEX IF NOT EXISTS thread_messages ON messages(thread_id);
+    -- 一个邮箱全局只能属于一个账号；users.email 是其中被设为「主邮箱」的那一个。
+    CREATE TABLE IF NOT EXISTS user_emails (
+      email TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+      verified_at TEXT NOT NULL, created_at TEXT NOT NULL
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS user_emails_user ON user_emails(user_id);
+    -- 登录验证码仍在 otps；绑定新邮箱与二次验证的验证码按用途、账号隔离在这里。
+    CREATE TABLE IF NOT EXISTS email_codes (
+      purpose TEXT NOT NULL CHECK(purpose IN ('bind','reauth')), user_id TEXT NOT NULL REFERENCES users(id), email TEXT NOT NULL,
+      salt BLOB NOT NULL, code_hash BLOB NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, consumed_at INTEGER,
+      PRIMARY KEY(purpose, user_id, email)
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS auth_failures (
+      key TEXT PRIMARY KEY, count INTEGER NOT NULL, first_at INTEGER NOT NULL, locked_until INTEGER
+    ) STRICT;
   `);
+  // 旧库迁移：只加列、不改已有数据；可重复执行。
+  const columnsOf = table => new Set(db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name));
+  const userColumns = columnsOf('users');
+  for (const [name, type] of [['password_hash', 'TEXT'], ['password_changed_at', 'TEXT']]) {
+    if (!userColumns.has(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${type}`);
+  }
+  const sessionColumns = columnsOf('sessions');
+  for (const [name, type] of [['verified_at', 'INTEGER'], ['user_agent', 'TEXT'], ['last_seen_at', 'INTEGER']]) {
+    if (!sessionColumns.has(name)) db.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${type}`);
+  }
+  db.exec('INSERT OR IGNORE INTO user_emails(email,user_id,verified_at,created_at) SELECT email,id,created_at,created_at FROM users');
   const get = (sql, ...args) => db.prepare(sql).get(...args);
   const all = (sql, ...args) => db.prepare(sql).all(...args);
   const run = (sql, ...args) => db.prepare(sql).run(...args);
@@ -327,6 +393,7 @@ function createApp(options = {}) {
     sandboxPurchase: dev, setLocation: dev, markDelivered: dev, reviewCreation: dev, reset: false,
     email: { configured: mailReady, mode: dev ? 'disabled-development' : 'resend', deliveryWebhooksConfigured: false },
     location: { configured: locationReady, provider: 'tencent', trustProxy: env.TRUST_PROXY || false },
+    auth: { methods: ['email-code', 'password'], maxEmails: MAX_EMAILS, reauthMinutes: REAUTH_MS / 60000, codeMinutes: OTP_MS / 60000 },
     persistence: 'sqlite', income: 0
   });
   function product(productId) {
@@ -368,9 +435,11 @@ function createApp(options = {}) {
     return all(`SELECT m.*,u.name AS author FROM messages m JOIN users u ON u.id=m.author_id WHERE m.${column}=? ORDER BY m.rowid`, value)
       .map(m => ({ id: m.id, authorId: m.author_id, author: m.author, text: m.text, time: m.time }));
   }
-  function letterJSON(row) {
+  function letterJSON(row, userId = null) {
+    // 收发方身份按账号判断：主邮箱可以更换，寄信时快照下来的 fromEmail 不再可靠。
+    const role = userId && row.sender_id === userId ? 'sender' : userId && row.receiver_id === userId ? 'recipient' : null;
     return {
-      ...JSON.parse(row.data), status: row.status, sandbox: Boolean(row.sandbox), demo: Boolean(row.sandbox),
+      ...JSON.parse(row.data), role, status: row.status, sandbox: Boolean(row.sandbox), demo: Boolean(row.sandbox),
       acceptedAt: row.accepted_at, deliveredAt: row.delivered_at, receivedAt: row.claimed_at,
       deliveryNote: row.delivery_note, messages: messages('letter', row.id)
     };
@@ -388,8 +457,11 @@ function createApp(options = {}) {
   function bootstrap(ctx) {
     const userId = ctx.user?.id || null;
     const user = userId ? get('SELECT * FROM users WHERE id=?', userId) : null;
+    const verifiedAt = ctx.session?.verified_at;
+    const fresh = Boolean(user && verifiedAt && now() - verifiedAt <= REAUTH_MS);
     const state = {
-      user: publicUser(user), account: publicUser(user), location: ctx.location,
+      user: publicUser(user), account: user ? { ...accountJSON(user), verifiedUntil: fresh ? new Date(verifiedAt + REAUTH_MS).toISOString() : null } : null,
+      location: ctx.location,
       claimedFree: Boolean(user?.claimed_free), assets: [], letters: [], creations: [], transactions: [],
       market: all('SELECT l.*,u.name AS seller_name FROM listings l JOIN users u ON u.id=l.seller_id WHERE l.active=1 ORDER BY l.rowid DESC')
         .map(row => listingJSON(row, userId)),
@@ -397,7 +469,7 @@ function createApp(options = {}) {
     };
     if (user) {
       state.assets = all('SELECT * FROM assets WHERE owner_id=? ORDER BY rowid', userId).map(assetJSON);
-      state.letters = all('SELECT * FROM letters WHERE sender_id=? OR receiver_id=? ORDER BY rowid', userId, userId).map(letterJSON);
+      state.letters = all('SELECT * FROM letters WHERE sender_id=? OR receiver_id=? ORDER BY rowid', userId, userId).map(row => letterJSON(row, userId));
       state.creations = all('SELECT * FROM creations WHERE user_id=? ORDER BY rowid', userId).map(creationJSON);
       state.community = all('SELECT * FROM threads WHERE buyer_id=? OR seller_id=? ORDER BY rowid', userId, userId).map(row => threadJSON(row, userId));
       state.transactions = all('SELECT * FROM transactions WHERE user_id=? ORDER BY rowid', userId).map(row => ({
@@ -417,19 +489,29 @@ function createApp(options = {}) {
   function cookie(res, token, clear = false) {
     res.setHeader('Set-Cookie', `${COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${clear ? 0 : SESSION_MS / 1000}${dev ? '' : '; Secure'}`);
   }
-  function createSession(res, userId, location) {
+  function createSession(res, userId, location, meta = {}) {
     const token = randomToken();
     const hash = sha256(token);
-    run('INSERT INTO sessions VALUES(?,?,?,?,?)', hash, userId, location, now(), now() + SESSION_MS);
+    const ua = typeof meta.ua === 'string' && meta.ua ? meta.ua.slice(0, 300) : null;
+    const at = now();
+    const verifiedAt = meta.verified ? at : null;
+    run('INSERT INTO sessions(token_hash,user_id,location,created_at,expires_at,verified_at,user_agent,last_seen_at) VALUES(?,?,?,?,?,?,?,?)',
+      hash, userId, location, at, at + SESSION_MS, verifiedAt, ua, at);
     cookie(res, token);
-    return { token_hash: hash, user_id: userId, location };
+    return { token_hash: hash, user_id: userId, location, created_at: at, expires_at: at + SESSION_MS, verified_at: verifiedAt, user_agent: ua, last_seen_at: at };
   }
   async function context(req, res) {
     const ip = clientIP(req, env.TRUST_PROXY);
+    const ua = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : '';
     const cookies = (req.headers.cookie || '').split(';').map(v => v.trim()).filter(v => v.startsWith(`${COOKIE}=`));
     const token = cookies.length === 1 ? cookies[0].slice(COOKIE.length + 1) : '';
     let session = /^[A-Za-z0-9_-]{43}$/.test(token) ? get('SELECT * FROM sessions WHERE token_hash=? AND expires_at>?', sha256(token), now()) : null;
-    if (!session) session = createSession(res, null, dev ? 'tokyo' : null);
+    if (!session) session = createSession(res, null, dev ? 'tokyo' : null, { ua });
+    else if (session.user_id && (!session.last_seen_at || now() - session.last_seen_at > 60000)) {
+      // 「最近活跃」只做粗粒度记录，一分钟内的请求不重复写库。
+      run('UPDATE sessions SET last_seen_at=? WHERE token_hash=?', now(), session.token_hash);
+      session.last_seen_at = now();
+    }
     let location = dev ? session.location : null;
     if (!dev && isPublicIP(ip)) {
       const key = sha256(ip).toString('hex');
@@ -443,9 +525,61 @@ function createApp(options = {}) {
       }
     }
     const user = session.user_id ? get('SELECT * FROM users WHERE id=?', session.user_id) : null;
-    return { session, user, location, ip };
+    return { session, user, location, ip, ua };
   }
   function requireUser(ctx) { if (!ctx.user) fail(401, 'AUTH_REQUIRED', '请先验证邮箱并登录。'); }
+  function requireFresh(ctx) {
+    requireUser(ctx);
+    const at = ctx.session.verified_at;
+    if (!at || now() - at > REAUTH_MS) fail(403, 'REAUTH_REQUIRED', '为保护账号安全，请先验证身份再继续。');
+  }
+  function userByEmail(email) {
+    return get('SELECT u.* FROM user_emails e JOIN users u ON u.id=e.user_id WHERE e.email=?', email) || null;
+  }
+  function ownsEmail(userId, email) {
+    return Boolean(userId && get('SELECT 1 AS ok FROM user_emails WHERE email=? AND user_id=?', email, userId));
+  }
+  function emailCount(userId) { return get('SELECT count(*) AS n FROM user_emails WHERE user_id=?', userId).n; }
+  function accountJSON(user) {
+    if (!user) return null;
+    const emails = all('SELECT * FROM user_emails WHERE user_id=? ORDER BY created_at, rowid', user.id)
+      .map(row => ({ email: row.email, primary: row.email === user.email, verifiedAt: row.verified_at }));
+    return {
+      ...publicUser(user), emails, maxEmails: MAX_EMAILS, hasPassword: Boolean(user.password_hash),
+      passwordChangedAt: user.password_changed_at || null, createdAt: user.created_at
+    };
+  }
+  function reloadUser(ctx) { ctx.user = get('SELECT * FROM users WHERE id=?', ctx.user.id); return ctx.user; }
+  function startLogin(ctx, res, user) {
+    run('DELETE FROM sessions WHERE token_hash=?', ctx.session.token_hash);
+    return createSession(res, user.id, dev ? ctx.location : null, { ua: ctx.ua, verified: true });
+  }
+  // 登录失败计数：窗口外自动重置；达到上限后锁定，锁定期内连正确密码也不接受。
+  function failureKeys(ctx, email) {
+    const keys = [`pw:email:${hex(email)}`];
+    if (!dev) keys.push(`pw:ip:${hex(ctx.ip)}`);
+    return keys;
+  }
+  function assertNotLocked(keys) {
+    for (const key of keys) {
+      const row = get('SELECT * FROM auth_failures WHERE key=?', key);
+      if (row?.locked_until && row.locked_until > now()) {
+        const minutes = Math.max(1, Math.ceil((row.locked_until - now()) / 60000));
+        fail(429, 'LOGIN_LOCKED', `密码错误次数过多，请 ${minutes} 分钟后再试，或改用邮箱验证码登录。`);
+      }
+    }
+  }
+  function recordFailure(keys) {
+    for (const key of keys) {
+      const row = get('SELECT * FROM auth_failures WHERE key=?', key);
+      if (!row || now() - row.first_at > FAILURE_WINDOW_MS) {
+        run('INSERT INTO auth_failures VALUES(?,1,?,NULL) ON CONFLICT(key) DO UPDATE SET count=1,first_at=excluded.first_at,locked_until=NULL', key, now());
+      } else {
+        const count = row.count + 1;
+        run('UPDATE auth_failures SET count=?,locked_until=? WHERE key=?', count, count >= MAX_FAILURES ? now() + LOCK_MS : row.locked_until, key);
+      }
+    }
+  }
   function requireDev() { if (!dev) fail(403, 'DEVELOPMENT_ONLY', '此测试功能在生产环境禁用。'); }
   function requireLocation(ctx) { if (!ctx.location || !Object.hasOwn(cities, ctx.location)) fail(403, 'LOCATION_UNKNOWN', '无法确认当前城市，不能进行当地操作。'); }
   function estimate(ctx, city) {
@@ -493,7 +627,9 @@ function createApp(options = {}) {
   }
   function verifyOTP(ctx, res, body) {
     const email = emailText(body.email);
-    const name = nameText(body.name);
+    // 昵称只在注册新邮箱时需要；已有账号登录时忽略，不会被覆盖。
+    const blankName = body.name === undefined || body.name === null || (typeof body.name === 'string' && body.name.trim() === '');
+    const name = blankName ? null : nameText(body.name);
     // 失败计数必须提交，不能随着 HTTP 错误一起回滚。
     const result = transaction(() => {
       const otp = get('SELECT * FROM otps WHERE email=?', email);
@@ -505,20 +641,43 @@ function createApp(options = {}) {
         run('UPDATE otps SET attempts=attempts+1 WHERE email=?', email);
         return { error: otp.attempts + 1 >= 5 ? [429, 'OTP_LOCKED', '验证码已锁定，请重新申请。'] : [400, 'OTP_INVALID_OR_EXPIRED', '验证码无效、已使用或已过期。'] };
       }
+      let user = userByEmail(email);
+      // 新邮箱但没给昵称：不消费验证码，让前端补填昵称后用同一个验证码重新提交。
+      if (!user && !name) return { error: [400, 'NAME_REQUIRED', '这是一个新邮箱，请填写昵称完成注册。'] };
       run('UPDATE otps SET consumed_at=? WHERE email=?', now(), email);
-      let user = get('SELECT * FROM users WHERE email=?', email);
       if (!user) {
-        run('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?)', id('user'), email, name, iso());
-        user = get('SELECT * FROM users WHERE email=?', email);
+        const userId = id('user');
+        run('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?)', userId, email, name, iso());
+        run('INSERT INTO user_emails(email,user_id,verified_at,created_at) VALUES(?,?,?,?)', email, userId, iso(), iso());
+        user = get('SELECT * FROM users WHERE id=?', userId);
       }
-      run('DELETE FROM sessions WHERE token_hash=?', ctx.session.token_hash);
-      const session = createSession(res, user.id, dev ? ctx.location : null);
-      return { user, session };
+      // 能收到邮箱验证码就证明了邮箱所有权，顺带清掉这个邮箱的密码失败计数。
+      run('DELETE FROM auth_failures WHERE key=?', `pw:email:${hex(email)}`);
+      return { user, session: startLogin(ctx, res, user) };
     });
     if (result.error) fail(...result.error);
     ctx.user = result.user;
     ctx.session = result.session;
     return publicUser(ctx.user);
+  }
+  function passwordLogin(ctx, res, body) {
+    const email = emailText(body.email);
+    const keys = failureKeys(ctx, email);
+    assertNotLocked(keys);
+    const user = userByEmail(email);
+    const matched = checkPassword(body.password, user?.password_hash);
+    if (!user || !matched) {
+      recordFailure(keys);
+      assertNotLocked(keys);
+      fail(400, 'INVALID_CREDENTIALS', '邮箱或密码不正确。没有设置过密码的账号，请用邮箱验证码登录。');
+    }
+    const session = transaction(() => {
+      run('DELETE FROM auth_failures WHERE key=?', keys[0]);
+      return startLogin(ctx, res, user);
+    });
+    ctx.user = user;
+    ctx.session = session;
+    return publicUser(user);
   }
   function logout(ctx, res) {
     run('DELETE FROM sessions WHERE token_hash=?', ctx.session.token_hash);
@@ -526,6 +685,187 @@ function createApp(options = {}) {
     ctx.location = dev ? 'tokyo' : ctx.location;
     cookie(res, '', true);
     return null;
+  }
+
+  // ---- 账号内验证码（绑定新邮箱、二次验证）----
+  async function issueCode(ctx, purpose, email, subject, intro) {
+    const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+    const salt = crypto.randomBytes(16);
+    const hash = crypto.scryptSync(code, salt, 32);
+    transaction(() => {
+      const keys = [`${purpose}:email:${hex(email)}`];
+      if (!dev) keys.push(`${purpose}:ip:${hex(ctx.ip)}`);
+      for (const key of keys) {
+        const limit = get('SELECT requested_at FROM rate_limits WHERE key=?', key);
+        if (limit && now() - limit.requested_at < rateLimitMs) fail(429, 'RATE_LIMITED', '验证码请求过于频繁，请稍后再试。');
+      }
+      for (const key of keys) run('INSERT INTO rate_limits VALUES(?,?) ON CONFLICT(key) DO UPDATE SET requested_at=excluded.requested_at', key, now());
+      run(`INSERT INTO email_codes VALUES(?,?,?,?,?,0,?,NULL) ON CONFLICT(purpose,user_id,email) DO UPDATE SET
+        salt=excluded.salt,code_hash=excluded.code_hash,attempts=0,expires_at=excluded.expires_at,consumed_at=NULL`,
+        purpose, ctx.user.id, email, salt, hash, now() + OTP_MS);
+    });
+    if (dev) return { devCode: code, emailSent: false, sandbox: true, sentTo: maskEmail(email), note: '本地开发验证码，未发送任何邮件。' };
+    try {
+      await deliverMail({ to: email, subject, text: `${intro}验证码是 ${code}，10 分钟内有效，请勿转发。如果不是你本人操作，请忽略本邮件。`, idempotencyKey: id(purpose) });
+    } catch {
+      run('UPDATE email_codes SET consumed_at=? WHERE purpose=? AND user_id=? AND email=? AND code_hash=?', now(), purpose, ctx.user.id, email, hash);
+      fail(503, 'MAIL_UNAVAILABLE', '验证码邮件暂时无法发送，请稍后再试。');
+    }
+    return { emailSent: true, status: 'accepted', sentTo: maskEmail(email) };
+  }
+  // 返回错误数组而不是直接抛出，好让失败次数在事务里提交。
+  function consumeCode(ctx, purpose, email, code) {
+    const row = get('SELECT * FROM email_codes WHERE purpose=? AND user_id=? AND email=?', purpose, ctx.user.id, email);
+    if (!row || row.consumed_at !== null || row.expires_at <= now()) return [400, 'CODE_INVALID_OR_EXPIRED', '验证码无效、已使用或已过期。'];
+    if (row.attempts >= 5) return [429, 'CODE_LOCKED', '验证码已锁定，请重新获取。'];
+    const supplied = typeof code === 'string' && /^\d{6}$/.test(code) ? code : '';
+    const hash = crypto.scryptSync(supplied, Buffer.from(row.salt), 32);
+    if (!crypto.timingSafeEqual(hash, Buffer.from(row.code_hash))) {
+      run('UPDATE email_codes SET attempts=attempts+1 WHERE purpose=? AND user_id=? AND email=?', purpose, ctx.user.id, email);
+      return row.attempts + 1 >= 5 ? [429, 'CODE_LOCKED', '验证码已锁定，请重新获取。'] : [400, 'CODE_INVALID_OR_EXPIRED', '验证码无效、已使用或已过期。'];
+    }
+    run('UPDATE email_codes SET consumed_at=? WHERE purpose=? AND user_id=? AND email=?', now(), purpose, ctx.user.id, email);
+    return null;
+  }
+  function markVerified(ctx) {
+    run('UPDATE sessions SET verified_at=? WHERE token_hash=?', now(), ctx.session.token_hash);
+    ctx.session.verified_at = now();
+  }
+
+  // ---- 二次验证：邮箱验证码或密码，任选其一 ----
+  async function requestReauth(ctx) {
+    requireUser(ctx);
+    return issueCode(ctx, 'reauth', ctx.user.email, 'PosterPosta 身份验证码', '你正在进行 PosterPosta 账号安全操作。');
+  }
+  function verifyReauth(ctx, body) {
+    requireUser(ctx);
+    if (body.password !== undefined) {
+      if (!ctx.user.password_hash) fail(409, 'NO_PASSWORD', '这个账号还没有设置密码，请用邮箱验证码验证。');
+      const keys = failureKeys(ctx, ctx.user.email);
+      assertNotLocked(keys);
+      if (!checkPassword(body.password, ctx.user.password_hash)) {
+        recordFailure(keys);
+        assertNotLocked(keys);
+        fail(400, 'INVALID_CREDENTIALS', '密码不正确。');
+      }
+      run('DELETE FROM auth_failures WHERE key=?', keys[0]);
+    } else {
+      const error = transaction(() => consumeCode(ctx, 'reauth', ctx.user.email, body.code));
+      if (error) fail(...error);
+    }
+    markVerified(ctx);
+    return accountJSON(ctx.user);
+  }
+
+  // ---- 资料 ----
+  function updateProfile(ctx, body) {
+    requireUser(ctx);
+    const name = nameText(body.name);
+    run('UPDATE users SET name=? WHERE id=?', name, ctx.user.id);
+    return accountJSON(reloadUser(ctx));
+  }
+
+  // ---- 邮箱绑定 ----
+  function assertBindable(ctx, email) {
+    const owner = get('SELECT user_id FROM user_emails WHERE email=?', email);
+    if (owner?.user_id === ctx.user.id) fail(409, 'EMAIL_ALREADY_BOUND', '这个邮箱已经绑定在当前账号。');
+    if (owner) fail(409, 'EMAIL_TAKEN', '这个邮箱已属于另一个账号。请先在那个账号里解绑，或直接用它登录。');
+    if (emailCount(ctx.user.id) >= MAX_EMAILS) fail(409, 'EMAIL_LIMIT', `每个账号最多绑定 ${MAX_EMAILS} 个邮箱，请先解绑一个。`);
+  }
+  async function requestBind(ctx, body) {
+    requireFresh(ctx);
+    const email = emailText(body.email);
+    assertBindable(ctx, email);
+    return issueCode(ctx, 'bind', email, 'PosterPosta 绑定邮箱验证码', '你正在把这个邮箱绑定到一个 PosterPosta 账号。');
+  }
+  function verifyBind(ctx, body) {
+    requireFresh(ctx);
+    const email = emailText(body.email);
+    const error = transaction(() => {
+      const failed = consumeCode(ctx, 'bind', email, body.code);
+      if (failed) return failed;
+      // 发码到验证之间可能被别人抢先绑定，或本账号已满，在同一事务里再核一次。
+      assertBindable(ctx, email);
+      run('INSERT INTO user_emails(email,user_id,verified_at,created_at) VALUES(?,?,?,?)', email, ctx.user.id, iso(), iso());
+      return null;
+    });
+    if (error) fail(...error);
+    return accountJSON(reloadUser(ctx));
+  }
+  function setPrimaryEmail(ctx, body) {
+    requireFresh(ctx);
+    const email = emailText(body.email);
+    if (!ownsEmail(ctx.user.id, email)) fail(404, 'EMAIL_NOT_BOUND', '这个邮箱没有绑定在当前账号。');
+    run('UPDATE users SET email=? WHERE id=?', email, ctx.user.id);
+    return accountJSON(reloadUser(ctx));
+  }
+  function removeEmail(ctx, body) {
+    requireFresh(ctx);
+    const email = emailText(body.email);
+    transaction(() => {
+      if (!ownsEmail(ctx.user.id, email)) fail(404, 'EMAIL_NOT_BOUND', '这个邮箱没有绑定在当前账号。');
+      if (email === ctx.user.email) fail(409, 'PRIMARY_EMAIL', '主邮箱不能解绑，请先把另一个邮箱设为主邮箱。');
+      run('DELETE FROM user_emails WHERE email=? AND user_id=?', email, ctx.user.id);
+      // 解绑后这个邮箱尚未使用的登录验证码一并作废，不能再借它登进本账号。
+      run('DELETE FROM otps WHERE email=?', email);
+      run('DELETE FROM email_codes WHERE email=? AND user_id=?', email, ctx.user.id);
+    });
+    return accountJSON(reloadUser(ctx));
+  }
+
+  // ---- 密码（可选） ----
+  function setPassword(ctx, body) {
+    requireUser(ctx);
+    const password = passwordText(body.password);
+    if (ctx.user.password_hash && body.currentPassword !== undefined) {
+      const keys = failureKeys(ctx, ctx.user.email);
+      assertNotLocked(keys);
+      if (!checkPassword(body.currentPassword, ctx.user.password_hash)) {
+        recordFailure(keys);
+        assertNotLocked(keys);
+        fail(400, 'INVALID_CREDENTIALS', '当前密码不正确。');
+      }
+    } else requireFresh(ctx);
+    const stored = hashPassword(password);
+    const revoked = transaction(() => {
+      run('UPDATE users SET password_hash=?,password_changed_at=? WHERE id=?', stored, iso(), ctx.user.id);
+      // 改密码后其他设备全部下线，当前设备保留并视为刚完成验证。
+      return run('DELETE FROM sessions WHERE user_id=? AND token_hash<>?', ctx.user.id, ctx.session.token_hash).changes;
+    });
+    markVerified(ctx);
+    return { ...accountJSON(reloadUser(ctx)), revokedSessions: revoked };
+  }
+  function removePassword(ctx) {
+    requireFresh(ctx);
+    if (!ctx.user.password_hash) fail(409, 'NO_PASSWORD', '这个账号没有设置密码。');
+    run('UPDATE users SET password_hash=NULL,password_changed_at=? WHERE id=?', iso(), ctx.user.id);
+    return accountJSON(reloadUser(ctx));
+  }
+
+  // ---- 登录设备 ----
+  const sessionId = hash => Buffer.from(hash).toString('hex').slice(0, 16);
+  function listSessions(ctx) {
+    requireUser(ctx);
+    const current = sessionId(ctx.session.token_hash);
+    return all('SELECT * FROM sessions WHERE user_id=? AND expires_at>? ORDER BY COALESCE(last_seen_at,created_at) DESC', ctx.user.id, now())
+      .map(row => ({
+        id: sessionId(row.token_hash), current: sessionId(row.token_hash) === current, device: deviceLabel(row.user_agent),
+        createdAt: new Date(row.created_at).toISOString(), lastSeenAt: new Date(row.last_seen_at ?? row.created_at).toISOString(),
+        expiresAt: new Date(row.expires_at).toISOString()
+      }));
+  }
+  function revokeSessions(ctx, body) {
+    requireFresh(ctx);
+    if (body.others === true) {
+      const revoked = run('DELETE FROM sessions WHERE user_id=? AND token_hash<>?', ctx.user.id, ctx.session.token_hash).changes;
+      return { revoked, sessions: listSessions(ctx) };
+    }
+    if (typeof body.id !== 'string' || !/^[0-9a-f]{16}$/.test(body.id)) fail(400, 'INVALID_INPUT', '设备标识无效。');
+    if (body.id === sessionId(ctx.session.token_hash)) fail(400, 'CURRENT_SESSION', '当前设备请直接使用「退出账号」。');
+    const row = all('SELECT token_hash FROM sessions WHERE user_id=?', ctx.user.id).find(r => sessionId(r.token_hash) === body.id);
+    if (!row) fail(404, 'SESSION_NOT_FOUND', '没有找到这个登录设备，它可能已经退出。');
+    run('DELETE FROM sessions WHERE token_hash=?', row.token_hash);
+    return { revoked: 1, sessions: listSessions(ctx) };
   }
   function recordTransaction(userId, type, productId, assetId, marketId, amount, sandbox, description) {
     run('INSERT INTO transactions VALUES(?,?,?,?,?,?,?,?,?,?)', id('transaction'), userId, type, productId, assetId, marketId, amount, Number(sandbox), description, iso());
@@ -571,7 +911,7 @@ function createApp(options = {}) {
     objectInput(input);
     const toName = nameText(input.toName);
     const toEmail = emailText(input.toEmail);
-    if (toEmail === ctx.user.email) fail(400, 'SELF_RECIPIENT', '不能寄给自己的邮箱。');
+    if (ownsEmail(ctx.user.id, toEmail)) fail(400, 'SELF_RECIPIENT', '不能寄给自己账号绑定的邮箱。');
     const toCity = cityKey(input.toCity);
     const message = text(input.message, '寄语', 1, 500);
     const range = estimate(ctx, toCity);
@@ -594,7 +934,7 @@ function createApp(options = {}) {
       run(`INSERT INTO letters(id,sender_id,to_email,asset_id,stamp_asset_id,status,data,claim_hash,sandbox)
         VALUES(?,?,?,?,?,'transit',?,?,?)`, letter.id, ctx.user.id, toEmail, card.id, stamp.id, JSON.stringify(letter), sha256(token), Number(dev));
       run("INSERT INTO jobs(id,letter_id,status,due_at) VALUES(?,?,'pending',?)", id('job'), letter.id, Date.parse(letter.eta));
-      const result = letterJSON(get('SELECT * FROM letters WHERE id=?', letter.id));
+      const result = letterJSON(get('SELECT * FROM letters WHERE id=?', letter.id), ctx.user.id);
       // 沙盒领取凭据只在本次操作结果中返回；bootstrap 和数据库不保存明文 token。
       if (dev) result.sandboxClaimToken = token;
       return result;
@@ -614,7 +954,7 @@ function createApp(options = {}) {
     return transaction(() => {
       run("UPDATE letters SET status='delivered',delivered_at=?,delivery_note=? WHERE id=?", iso(), '仅开发模拟投递：没有发送邮件，也没有真实送达。', letter.id);
       run("UPDATE jobs SET status='done',finished_at=? WHERE letter_id=?", now(), letter.id);
-      return letterJSON(get('SELECT * FROM letters WHERE id=?', letter.id));
+      return letterJSON(get('SELECT * FROM letters WHERE id=?', letter.id), ctx.user.id);
     });
   }
   function insertMessage(ctx, kind, target, value) {
@@ -731,22 +1071,22 @@ function createApp(options = {}) {
       if (row.claimed_at) fail(409, 'ALREADY_CLAIMED', '信件已被签收。');
       return { fromName: JSON.parse(row.data).fromName, maskedEmail: maskEmail(row.to_email) };
     }
-    if (ctx.user.email !== row.to_email) fail(403, 'CLAIM_EMAIL_MISMATCH', '请使用收件邮箱验证登录。');
+    if (!ownsEmail(ctx.user.id, row.to_email)) fail(403, 'CLAIM_EMAIL_MISMATCH', '请用收信邮箱登录，或先把收信邮箱绑定到当前账号。');
     if (!canClaim(row) && row.status !== 'received') fail(409, 'LETTER_NOT_READY', '信件尚未进入可签收状态。');
-    return letterJSON(row);
+    return letterJSON(row, ctx.user.id);
   }
   function claim(ctx, token) {
     requireUser(ctx);
     return transaction(() => {
       const row = claimRow(token);
-      if (ctx.user.email !== row.to_email) fail(403, 'CLAIM_EMAIL_MISMATCH', '只有已验证的收件邮箱可以签收。');
+      if (!ownsEmail(ctx.user.id, row.to_email)) fail(403, 'CLAIM_EMAIL_MISMATCH', '只有绑定了收信邮箱的账号才能签收。');
       if (row.claimed_at) fail(409, 'ALREADY_CLAIMED', '这封信已经签收，不能重复领取资产。');
       if (!canClaim(row)) fail(409, 'LETTER_NOT_READY', '信件尚未进入可签收状态。');
       const moved = run("UPDATE assets SET owner_id=?,status='received' WHERE id=? AND owner_id=? AND status='sent'", ctx.user.id, row.asset_id, row.sender_id);
       if (moved.changes !== 1) fail(409, 'ASSET_CONFLICT', '信件资产状态冲突。');
       const changed = run("UPDATE letters SET receiver_id=?,status='received',claimed_at=? WHERE id=? AND claimed_at IS NULL", ctx.user.id, iso(), row.id);
       if (changed.changes !== 1) fail(409, 'ALREADY_CLAIMED', '信件已经签收。');
-      return letterJSON(get('SELECT * FROM letters WHERE id=?', row.id));
+      return letterJSON(get('SELECT * FROM letters WHERE id=?', row.id), ctx.user.id);
     });
   }
   const actions = Object.freeze({
@@ -942,6 +1282,18 @@ function createApp(options = {}) {
       else if (req.method === 'POST' && pathname === '/api/auth/request') result = await requestOTP(ctx, body);
       else if (req.method === 'POST' && pathname === '/api/auth/verify') result = verifyOTP(ctx, res, body);
       else if (req.method === 'POST' && pathname === '/api/auth/logout') result = logout(ctx, res);
+      else if (req.method === 'POST' && pathname === '/api/auth/password') result = passwordLogin(ctx, res, body);
+      else if (req.method === 'POST' && pathname === '/api/auth/reauth/request') result = await requestReauth(ctx);
+      else if (req.method === 'POST' && pathname === '/api/auth/reauth/verify') result = verifyReauth(ctx, body);
+      else if (req.method === 'GET' && pathname === '/api/account/sessions') result = listSessions(ctx);
+      else if (req.method === 'POST' && pathname === '/api/account/sessions/revoke') result = revokeSessions(ctx, body);
+      else if (req.method === 'POST' && pathname === '/api/account/profile') result = updateProfile(ctx, body);
+      else if (req.method === 'POST' && pathname === '/api/account/password') result = setPassword(ctx, body);
+      else if (req.method === 'POST' && pathname === '/api/account/password/remove') result = removePassword(ctx);
+      else if (req.method === 'POST' && pathname === '/api/account/emails/request') result = await requestBind(ctx, body);
+      else if (req.method === 'POST' && pathname === '/api/account/emails/verify') result = verifyBind(ctx, body);
+      else if (req.method === 'POST' && pathname === '/api/account/emails/primary') result = setPrimaryEmail(ctx, body);
+      else if (req.method === 'POST' && pathname === '/api/account/emails/remove') result = removeEmail(ctx, body);
       else if (req.method === 'POST' && pathname === '/api/action') result = action(ctx, body);
       else if (req.method === 'POST' && pathname === '/api/claim') result = claim(ctx, body.token);
       else if (req.method === 'POST' && pathname === '/api/markDelivered') result = markDelivered(ctx, body.letterId);
