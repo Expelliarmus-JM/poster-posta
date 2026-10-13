@@ -5,7 +5,7 @@
   "description": "PosterPosta SQLite 持久化后端与无外部依赖测试",
   "main": "server.cjs",
   "engines": {
-    "node": ">=22.22.2"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env server.cjs",

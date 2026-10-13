@@ -1263,6 +1263,13 @@ function createApp(options = {}) {
     secureHeaders(res);
     try {
       if (closing) fail(503, 'SHUTTING_DOWN', '服务正在关闭。');
+      // 健康检查必须放在 Host / Origin 校验之前：托管平台（Railway、本项目云端沙箱等）
+      // 的探针常常带内部主机名而不是公开域名，走校验会被误判为不健康并导致部署失败。
+      // 这里只回一个固定的 ok，不泄露任何配置内容。
+      if (req.url === '/healthz' && (req.method === 'GET' || req.method === 'HEAD')) {
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+        return res.end(req.method === 'HEAD' ? undefined : '{"ok":true}');
+      }
       checkOrigin(req);
       if (!['GET', 'HEAD', 'POST'].includes(req.method)) fail(405, 'METHOD_NOT_ALLOWED', '不支持此请求方法。');
       if (!req.url.startsWith('/') || req.url.startsWith('//')) fail(400, 'INVALID_PATH', '路径无效。');

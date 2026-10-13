@@ -328,6 +328,16 @@ test('默认只监听回环；HOST=0.0.0.0 时仍由 ALLOWED_HOSTS 决定哪些�
   ok(await request(exposed.port, '/api/bootstrap', { headers: { Host: 'abc.app-tencent.workbuddy.host' } }));
   ok(await request(exposed.port, '/api/bootstrap', { headers: { Host: `127.0.0.1:${exposed.port}` } }));
 
+  // 健康检查刻意排在 Host / Origin 校验之前：托管平台的探针常带内部主机名，
+  // 若走校验会把健康的实例判成不健康、导致部署失败。它只回答固定的 ok。
+  const health = await request(exposed.port, '/healthz', { headers: { Host: 'internal-probe.invalid' } });
+  assert.equal(health.status, 200);
+  assert.deepEqual(health.data, { ok: true });
+  assert.equal((await request(exposed.port, '/healthz', { method: 'HEAD', headers: { Host: 'internal-probe.invalid' } })).status, 200);
+  // 开口仅限于 /healthz：同一主机名访问其他路径仍被拦下。
+  error(await request(exposed.port, '/api/bootstrap', { headers: { Host: 'internal-probe.invalid' } }), 403, 'HOST_FORBIDDEN');
+  error(await request(exposed.port, '/app.js', { headers: { Host: 'internal-probe.invalid' } }), 403, 'HOST_FORBIDDEN');
+
   // 只绑回环时（默认）Host 是唯一的准入屏障，开发环境也必须严格。
   error(await request(localOnly.server.address().port, '/api/bootstrap', { headers: { Host: 'demo.example.test' } }), 403, 'HOST_FORBIDDEN');
   // 生产环境即使对外监听，也只认 PUBLIC_ORIGIN。

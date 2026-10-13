@@ -22,7 +22,7 @@ open PosterPosta/index.html        # 或任意静态服务器指向该目录
 
 ### 后端 MVP
 
-要求 Node.js >= 22.22.2（用到内置 `node:sqlite`）。
+要求 Node.js >= 22.13.0（用到内置 `node:sqlite`；该模块自 v22.13.0 / v23.4.0 起不再需要 `--experimental-sqlite`）。已在 Node 22.22.2 与 24.11.0 上验证测试全通过。
 
 ```bash
 cd PosterPosta-MVP
@@ -32,6 +32,39 @@ npm test                           # node --test，硬性零外部依赖
 ```
 
 `npm run dev` 是带 `--watch` 的开发模式。数据库按环境隔离在 `data/development.sqlite` 或 `data/production.sqlite`，可用 `DB_PATH` 指到绝对路径。
+
+## 部署
+
+### 硬性前提：要有持久化磁盘
+
+后端把状态存在单个 SQLite 文件里，所以托管平台必须**同时**提供「常驻 Node 进程」和「持久磁盘」。无服务器平台（Vercel、Netlify、Cloudflare Workers）不满足第二条：实例之间没有共享磁盘，请求会落到不同实例，账号和信件会在冷启动后消失，登录 cookie 也会随机失效。要在那类平台跑，必须把 `node:sqlite` 换成托管 Postgres。
+
+### Railway（push 即部署）
+
+仓库里已带 `PosterPosta-MVP/railway.json`（启动命令 `node server.cjs`，健康检查 `/healthz`）。在 Railway 建 Project 时：
+
+1. **Root Directory** 填 `PosterPosta-MVP`（不填会把整个仓库当根，找不到 `package.json`）
+2. **Volume** 挂到 `/data` —— 数据库落在这里，重新部署不丢
+3. **Variables** 至少配这几项：
+
+| 变量 | 值 | 作用 |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | 允许反向代理转发进来（默认只绑回环） |
+| `APP_ENV` | `development` | 演示模式。切 `production` 还强制要求 HTTPS origin、`RESEND_API_KEY`、`MAIL_FROM`、`TENCENT_LOCATION_KEY` |
+| `DB_PATH` | `/data/posta.sqlite` | 指向卷。父目录会自动创建 |
+| `PUBLIC_ORIGIN` | `https://<你的域名>` | 浏览器 Origin 白名单，必须与实际访问域名完全一致 |
+| `ALLOWED_HOSTS` | `<你的域名>` | Host 白名单，支持 `*.example.com` 通配 |
+| `NIXPACKS_NODE_VERSION` | `22` | 保险项，避免构建器选出不支持 `node:sqlite` 的 Node |
+
+配好后 `git push` 到 main 即自动重新部署。之后要改公开域名，只需同步改 `PUBLIC_ORIGIN` 与 `ALLOWED_HOSTS`。
+
+**排查用**：忘了配 `PUBLIC_ORIGIN` 会被 `CSRF_ORIGIN` 拒绝；`ALLOWED_HOSTS` 没覆盖实际 Host 会被 `HOST_FORBIDDEN` 拒绝。两者都是 403，看 `code` 字段即可区分。`/healthz` 刻意放在这两道校验之前（托管平台探针常带内部主机名），只返回 `{"ok":true}`，不泄露配置。
+
+### 云端沙箱（当前线上演示）
+
+托管环境的反向代理不转发公开域名，而是把内部主机名当 Host 转发，因此两个白名单必须分开写：`ALLOWED_HOSTS` 放内部域名，`PUBLIC_ORIGIN` 放公开域名。这类环境拿不到启动命令里的环境变量，参数写在仓库内的 `PosterPosta-MVP/deploy.config.json`（以及 `public/` 下一份副本）。
+
+读取优先级是 **真实环境变量 > `deploy.config.json`**，所以同一份代码可以同时服务两类平台：文件留给不支持环境变量的沙箱，Railway 等平台在控制台设置即可覆盖。注意沙箱那份文件里写的是沙箱自己的域名——换平台后如果发现有变量漏配，会回落到这些值上，表现为 403。
 
 ## 账号体系
 
@@ -49,7 +82,7 @@ npm test                           # node --test，硬性零外部依赖
 ## 当前边界
 
 - **已实现**：邮箱随机 OTP（有效期 / 尝试上限 / 按邮箱限流）、可选密码登录与失败锁定、多邮箱绑定、敏感操作二次验证、登录设备管理、会话哈希与 HttpOnly Cookie、SQLite 多账户隔离、服务端城市资格与资产所有权校验、免费名额跨城市唯一与原子消耗、市集并发交易单胜者、固定工作日 ETA 与持久投递队列、收件链接绑定邮箱与一次性签收、双向共享聊天、图片格式与魔数校验、原创待审核。
-- **未实现**：真实商户支付与退款、生产级 HTTPS 域名、持久化磁盘与备份监控。
+- **未实现**：真实商户支付与退款、生产级自定义域名与 HTTPS、数据库备份与监控告警。
 
 `.env.example` 里的 `RESEND_API_KEY`、`TENCENT_LOCATION_KEY` 均为空模板：邮件与 IP 定位适配器已按官方接口写好，但**未配置、未实网验证**；开发模式永不发送真实邮件。支付未接入时，生产环境会强制拒绝付费发货。
 

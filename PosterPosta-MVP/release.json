@@ -2,13 +2,15 @@
   "product": "PosterPosta",
   "version": "0.2.0",
   "stage": "已发布到演示沙箱的可运行后端MVP，不是已上线商业产品",
-  "runtime": "Node.js >=22.22.2，零外部运行依赖；node:sqlite 在当前运行时仍有实验性警告",
+  "runtime": "Node.js >=22.13.0，零外部运行依赖；node:sqlite 在当前运行时仍有实验性警告（自 v22.13.0/v23.4.0 起免 --experimental-sqlite，已在 22.22.2 与 24.11.0 上跑通全部测试）",
   "start": "本地：在项目目录执行 npm start，默认只监听 http://127.0.0.1:4180，仅本机可访问",
   "deployment": {
     "published_demo": "https://poster-posta.app-tencent.workbuddy.host",
     "mode": "APP_ENV=development 的公开演示沙箱：邮箱验证码登录可自助完成（开发模式不发送邮件、验证码由服务端直接返回），付费购买与审核按钮为演示开关，不涉及真实扣款",
     "params": "托管环境的反向代理不转发公开域名，而是把内部主机名当 Host 转发（实测形如 <端口>-<sandboxId>.e2b.<地域>.internal.invalid），两个参数必须同时配：ALLOWED_HOSTS 覆盖内部域名（过 Host 校验），PUBLIC_ORIGIN 写公开访问域名（过浏览器 Origin 校验）。只配 PUBLIC_ORIGIN 会 HOST_FORBIDDEN，只配 ALLOWED_HOSTS 会 CSRF_ORIGIN。参数写在 deploy.config.json（根目录与 public/ 各一份，经实测会被读取）；HOST=0.0.0.0 让反向代理可转发。startCmd 里内联环境变量不可靠（实测不生效），不要走那条路。",
-    "host_admission": "绑回环时 Host 是唯一准入屏障，必须严格匹配；开发环境显式对外监听且未配置对外域名时不再用 Host 卡自己，跨站请求仍由 Origin 与 Fetch Metadata 拒绝；生产始终只认 PUBLIC_ORIGIN"
+    "host_admission": "绑回环时 Host 是唯一准入屏障，必须严格匹配；开发环境显式对外监听且未配置对外域名时不再用 Host 卡自己，跨站请求仍由 Origin 与 Fetch Metadata 拒绝；生产始终只认 PUBLIC_ORIGIN",
+    "git_connected": "Railway：GitHub 原生自动部署 + Volume 持久磁盘，零代码改动。Root Directory 填 PosterPosta-MVP，Volume 挂 /data，变量配 HOST=0.0.0.0、APP_ENV=development、DB_PATH=/data/posta.sqlite、PUBLIC_ORIGIN=https://<域名>、ALLOWED_HOSTS=<域名>、NIXPACKS_NODE_VERSION=22；仓库内 PosterPosta-MVP/railway.json 已给出启动命令与健康检查。读取优先级为真实环境变量 > deploy.config.json，因此同一份代码可同时服务「不支持环境变量的沙箱」（走文件）与 Railway（走控制台）。",
+    "health_check": "/healthz 返回 {\"ok\":true}，刻意排在 Host 与 Origin 校验之前——托管平台探针常带内部主机名，走校验会把健康实例判成不健康导致部署失败；该开口仅限此路径，其他路径与静态资源仍被 Host 校验拦下（有测试断言）。"
   },
   "test": "npm test",
   "configuration": ".env.example 是配置模板，实际凭据只能放未入库的 .env 或服务器环境变量；deploy.config.json 只放非敏感部署参数",
@@ -32,7 +34,7 @@
     "email": "Resend HTTPS API已实现，未配置也未实际发送；开发永不发送",
     "ip_location": "腾讯位置服务IP接口已实现，未配置也未实网验证；不识别城市暂停当地获取",
     "payment": "未实现真实商户支付、退款、提现，生产强制关闭",
-    "hosting": "已发布到托管沙箱做演示，但未做生产部署：仍缺HTTPS自有域名、持久化磁盘、备份和监控"
+    "hosting": "已发布到托管沙箱做演示，并已备好 Railway 的 push 即部署配置；仍未做生产部署：缺 HTTPS 自有域名、数据库备份与监控告警。"
   },
   "before_public_launch": [
     "配置并验证邮箱域名、发信密钥、腾讯定位Key、HTTPS公开域名",
