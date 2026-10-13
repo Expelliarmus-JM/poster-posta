@@ -1,0 +1,43 @@
+name: Deploy PosterPosta prototype to Pages
+
+# push 到 main 就自动更新静态原型（GitHub Pages）。
+# 只发布 PosterPosta/ 这一个目录，并且剔掉构建脚本与测试文件——
+# 它们是本机开发用的，不该出现在公开站点上。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'PosterPosta/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同一时间只跑一个部署，新的 push 取消排队中的旧任务。
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 剔除本机开发用的文件
+        run: rm -f PosterPosta/build.py PosterPosta/engine.test.cjs PosterPosta/verification.json PosterPosta/.vercelignore
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: PosterPosta
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
